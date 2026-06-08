@@ -11,7 +11,6 @@ Hermes Agent 桌面界面模块，提供覆盖层和侧边栏功能。
 - **剪贴板翻译** (`_clipboard_translate.js`) - 剪贴板内容翻译
 - **股票侧边栏** (`_stock_sidebar.js`) - 股票行情查看
 - **Obsidian仓库** (`_obsidian_vault.js`) - Obsidian笔记集成
-- **吞噬山海游戏** (`game/`) - RPG游戏模块
 
 ## 启动方式
 
