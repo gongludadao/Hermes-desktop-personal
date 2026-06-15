@@ -1845,11 +1845,12 @@
     function walk(dir) {
       pending++;
       rpcCall('fs.list_dir', { path: dir }, function(r) {
-        if (r.error || !r.entries) { checkDone(); return; }
-        var entries = r.entries;
+        console.log('[AutoKB] list_dir result:', dir, r.error ? 'error' : (r.items ? r.items.length + ' items' : 'no items'));
+        if (r.error || !r.items) { checkDone(); return; }
+        var entries = r.items;
         for (var i = 0; i < entries.length; i++) {
           var e = entries[i];
-          var fp = dir + '/' + e.name;
+          var fp = e.path || (dir + '/' + e.name);
           if (e.is_dir) {
             walk(fp);
           } else if (/\.md$/i.test(e.name)) {
