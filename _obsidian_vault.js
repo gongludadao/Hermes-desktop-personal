@@ -172,3 +172,5 @@
         activateObsVault();
       }
     }
+    // 导出到全局，供 _chat_overlay.js 的 ws.onopen 调用
+    window.autoActivateObsVault = autoActivateObsVault;
