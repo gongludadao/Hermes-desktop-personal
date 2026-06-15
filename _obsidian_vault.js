@@ -139,16 +139,18 @@
       ws.send(JSON.stringify({ jsonrpc: '2.0', id: fid, method: 'fs.select_folder' }));
     }
 
-    // Event handlers
-    if (wsObsHeader) {
-      wsObsHeader.onclick = function(e) {
-        e.stopPropagation();
-        toggleObsSection();
-      };
-    }
-    if (wsObsSwitchVault) {
-      wsObsSwitchVault.onclick = function(e) {
-        e.stopPropagation();
-        selectObsVault();
-      };
+    // 初始化函数：在 DOM 元素定义后调用
+    function initObsVaultEvents() {
+      if (wsObsHeader) {
+        wsObsHeader.onclick = function(e) {
+          e.stopPropagation();
+          toggleObsSection();
+        };
+      }
+      if (wsObsSwitchVault) {
+        wsObsSwitchVault.onclick = function(e) {
+          e.stopPropagation();
+          selectObsVault();
+        };
+      }
     }

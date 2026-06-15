@@ -54,9 +54,13 @@
   var diffMode = false;
   var diffOriginal = '';
   var _refreshEditorFn = null;
-    var _lastWritePath = null;
+  var _lastWritePath = null;
   var _refreshTimer = null;
   var _renderAttachmentsFn = null;
+  var _autoKbEnabled = false;
+  var _autoKbStopWords = ['的','了','在','是','我','有','和','就','不','人','都','一','一个','上','也','很','到','说','要','去','你','会','着','没有','看','好','自己','这','那','什么','怎么','为什么','吗','呢','吧','啊','请','帮忙','帮我','帮我看看','帮我写','帮我分析'];
+  var _autoKbMaxFiles = 5;
+  var _autoKbMaxChars = 3000;
 
   // ── Markdown renderer ───────────────────────────────────────────────
   function renderMarkdown(text) {
@@ -354,6 +358,10 @@
     '</div>' +
         '<div id="hdc-input-area" style="padding:0 20px 10px;border-top:1px solid var(--hdc-border);display:flex;flex-direction:column;gap:0;flex-shrink:0;background:var(--hdc-muted)">' +
           '<div id="hdc-input-status" style="text-align:center;font-size:10px;color:var(--hdc-fg-dim);padding:3px 0;line-height:1.2">\u6b63\u5728\u8fde\u63a5...</div>' +
+          '<div id="hdc-auto-kb-bar" style="display:none;align-items:center;gap:4px;padding:2px 0;font-size:11px;color:var(--hdc-fg-dim)">' +
+            '<input type="checkbox" id="hdc-auto-kb-check" style="cursor:pointer;margin:0" />' +
+            '<label for="hdc-auto-kb-check" style="cursor:pointer;user-select:none">\u81ea\u52a8\u5f15\u7528\u77e5\u8bc6\u5e93</label>' +
+          '</div>' +
           '<div id="hdc-attachments" style="display:none;flex-wrap:wrap;gap:4px"></div>' +
           '<div style="display:flex;gap:10px">' +
             '<textarea id="hdc-input" placeholder="\u8f93\u5165\u6d88\u606f...\uff08\u56de\u8f66\u53d1\u9001\uff09" rows="1" ' +
@@ -367,7 +375,7 @@
     '<div id="hdc-workspace-sidebar" style="width:0;min-width:0;border-left:1px solid var(--hdc-border);display:flex;flex-direction:column;flex-shrink:0;overflow:hidden;transition:width 0.2s,min-width 0.2s;transition:none">' +
       // 中间可滚动区域
       '<div id="hdc-ws-scroll-area" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;min-height:0">' +
-      '<div id="hdc-ws-project-header" style="padding:6px 8px;border-bottom:1px solid var(--hdc-border);cursor:pointer;user-select:none;flex-shrink:0;background:var(--hdc-card)">' +
+      '<div id="hdc-ws-project-header" style="padding:6px 8px;border-bottom:1px solid var(--hdc-border);cursor:pointer;user-select:none;flex-shrink:0;background:var(--hdc-card)">'+
         '<div style="display:flex;align-items:center;gap:6px">' +
           '<span id="hdc-ws-project-arrow" style="font-size:10px;transition:transform 0.2s;display:inline-block">\u25b8</span>' +
           '<span>\ud83d\udcc1</span>' +
@@ -381,7 +389,7 @@
         '<div id="hdc-ws-project-tabs" style="display:flex;align-items:stretch;overflow-x:auto;border-bottom:1px solid var(--hdc-border);min-height:0"></div>' +
         '<div id="hdc-ws-tree" style="flex:1;overflow-y:auto;padding:4px 0 40px 0;font-size:12px;min-height:40px"></div>' +
       '</div>' +
-      '<div id="hdc-ws-note-header" style="padding:6px 8px;border-bottom:1px solid var(--hdc-border);border-top:1px solid var(--hdc-border);display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;flex-shrink:0;background:var(--hdc-card)">' +
+      '<div id="hdc-ws-note-header" style="padding:6px 8px;border-bottom:1px solid var(--hdc-border);border-top:1px solid var(--hdc-border);display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;flex-shrink:0;background:var(--hdc-card)">'+
         '<span id="hdc-ws-note-arrow" style="font-size:10px;transition:transform 0.2s;display:inline-block">\u25b8</span>' +
         '<span>\ud83d\udcdd</span>' +
         '<span style="font-size:12px;color:var(--hdc-fg)">\u8bb0\u4e8b\u672c</span>' +
@@ -395,7 +403,7 @@
           '<div style="padding:20px 8px;text-align:center;color:var(--hdc-fg-dim);font-size:11px">\u70b9\u51fb + \u65b0\u5efa\u7b14\u8bb0</div>' +
         '</div>' +
       '</div>' +
-      '<div id="hdc-ws-clip-header" style="padding:6px 8px;border-bottom:1px solid var(--hdc-border);border-top:1px solid var(--hdc-border);display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;flex-shrink:0;background:var(--hdc-card)">' +
+      '<div id="hdc-ws-clip-header" style="padding:6px 8px;border-bottom:1px solid var(--hdc-border);border-top:1px solid var(--hdc-border);display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;flex-shrink:0;background:var(--hdc-card)">'+
         '<span id="hdc-ws-clip-arrow" style="font-size:10px;transition:transform 0.2s;display:inline-block">\u25b8</span>' +
         '<span>\ud83d\udccb</span>' +
         '<span style="font-size:12px;color:var(--hdc-fg)">\u526a\u5207\u677f</span>' +
@@ -409,7 +417,7 @@
         '</div>' +
       '</div>' +
       // Obsidian Vault Module (between clipboard and stock)
-      '<div id="hdc-ws-obs-header" style="padding:6px 8px;border-bottom:1px solid var(--hdc-border);border-top:1px solid var(--hdc-border);display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;flex-shrink:0;background:var(--hdc-card)">' +
+      '<div id="hdc-ws-obs-header" style="padding:6px 8px;border-bottom:1px solid var(--hdc-border);border-top:1px solid var(--hdc-border);display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;flex-shrink:0;background:var(--hdc-card)">'+
         '<span id="hdc-ws-obs-arrow" style="font-size:10px;transition:transform 0.2s;display:inline-block">\u25b8</span>' +
         '<span>\ud83d\udcd8</span>' +
         '<span style="font-size:12px;color:var(--hdc-fg)">Obsidian \u4ed3\u5e93</span>' +
@@ -421,7 +429,7 @@
           '<div style="padding:20px 8px;text-align:center;color:var(--hdc-fg-dim);font-size:11px">\u672a\u914d\u7f6e\u4efb\u4f55 Obsidian \u4ed3\u5e93<br><br>\u70b9\u51fb [\u5207\u6362] \u9009\u6291\u4ed3\u5e93\u8def\u5f84</div>' +
         '</div>' +
       '</div>' +
-      '<div id="hdc-ws-stock-header" style="padding:6px 8px;border-bottom:1px solid var(--hdc-border);border-top:1px solid var(--hdc-border);display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;flex-shrink:0;background:var(--hdc-card)">' +
+      '<div id="hdc-ws-stock-header" style="padding:6px 8px;border-bottom:1px solid var(--hdc-border);border-top:1px solid var(--hdc-border);display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;flex-shrink:0;background:var(--hdc-card)">'+
         '<span id="hdc-ws-stock-arrow" style="font-size:10px;transition:transform 0.2s;display:inline-block">\u25b8</span>' +
         '<span>\ud83d\udcc8</span>' +
         '<span style="font-size:12px;color:var(--hdc-fg)">\u80a1\u7968</span>' +
@@ -504,7 +512,7 @@
       'new-session', 'refresh-sessions', 'toggle-workspace', 'auto-approve',
       'input-dialog', 'input-dialog-title', 'input-dialog-input',
       'input-dialog-cancel', 'input-dialog-ok', 'editor-save', 'editor-close',
-      'attachments', 'input-status'
+      'attachments', 'input-status', 'auto-kb-bar', 'auto-kb-check'
     ];
 
     elements.forEach(function(id) {
@@ -603,6 +611,7 @@
       }
     }
 
+    // ── 侧边栏模块拖拽排序 ──
     function toggleWorkspace() {
       wsOpen = !wsOpen;
       if (wsOpen) {
@@ -684,6 +693,11 @@
 
     // ── MODULES ──
 
+    // 初始化 Obsidian Vault 事件（模块注入后调用）
+    if (typeof initObsVaultEvents === 'function') {
+      initObsVaultEvents();
+    }
+
     var sidebarResizerEl = ui['resizer-sidebar'];
     initResizer(sidebarResizerEl, wsSidebar, 180, function() { return window.innerWidth * 0.5; }, 'col');
 
@@ -704,6 +718,13 @@
 
     sendBtn.onclick = doSend;
     stopBtn.onclick = doStop;
+    var autoKbBar = ui['auto-kb-bar'];
+    var autoKbCheck = ui['auto-kb-check'];
+    if (autoKbCheck) {
+      autoKbCheck.checked = _autoKbEnabled;
+      autoKbCheck.onchange = function() { _autoKbEnabled = autoKbCheck.checked; };
+    }
+    if (autoKbBar) autoKbBar.style.display = 'flex';
     sessionPicker.onchange = onSessionChange;
     ui['new-session'].onclick = doNewSession;
     ui['refresh-sessions'].onclick = function() { requestSessionList(); };
@@ -1531,6 +1552,37 @@
     } else {
       div.textContent = text;
     }
+
+    // AI 回复引用标注：检测消息中是否包含附件文件引用
+    if (type === 'bot' && !streaming) {
+      var noteRefs = [];
+      var checkText = isHtml ? text : div.textContent || '';
+      // 匹配 <file name="..."> 或 <attached_files 标签
+      var fileMatch = checkText.match(/<file\s+name="([^"]+)"/g);
+      if (fileMatch) {
+        for (var fmi = 0; fmi < fileMatch.length; fmi++) {
+          var m = fileMatch[fmi].match(/<file\s+name="([^"]+)"/);
+          if (m && m[1]) {
+            var n = m[1].replace(/\.md$/i, '');
+            if (noteRefs.indexOf(n) < 0) noteRefs.push(n);
+          }
+        }
+      }
+      var attachedMatch = checkText.match(/<attached_files\s+count="(\d+)"/);
+      if (attachedMatch && attachedMatch[1]) {
+        var count = parseInt(attachedMatch[1]);
+        if (count > 0 && noteRefs.length === 0) {
+          noteRefs.push(count + ' \u7bc7\u7b14\u8bb0');
+        }
+      }
+      if (noteRefs.length > 0) {
+        var refTag = document.createElement('div');
+        refTag.style.cssText = 'margin-top:6px;font-size:11px;color:var(--hdc-fg-dim);border-top:1px solid var(--hdc-border);padding-top:4px;';
+        refTag.textContent = '\u57fa\u4e8e ' + noteRefs.length + ' \u7bc7\u7b14\u8bb0\u56de\u7b54';
+        div.appendChild(refTag);
+      }
+    }
+
     msgsEl.appendChild(div);
     msgsEl.scrollTop = msgsEl.scrollHeight;
     return div;
@@ -1737,24 +1789,176 @@
     if (statusEl) { statusEl.textContent = '\u5df2\u505c\u6b62'; statusEl.style.color = 'var(--hdc-fg-dim)'; }
   }
 
-  function doSend() {
-    if (!inpEl) return;
-    var text = inpEl.value.trim();
-    if (!text) return;
-    if (!ready) { if (statusEl) { statusEl.textContent = '\u7b49\u5f85\u8fde\u63a5\u5c31\u7eea...'; statusEl.style.color = 'var(--hdc-fg-dim)'; } return; }
-    if (sending) return;
-    if (!ws || ws.readyState !== WebSocket.OPEN) { if (statusEl) { statusEl.textContent = '\u8fde\u63a5\u65ad\u5f00\uff0c\u6b63\u5728\u91cd\u8fde...'; statusEl.style.color = T.red; } return; }
-    pendingBotMsgs = [];
-    if (pendingBotTimer) { clearTimeout(pendingBotTimer); pendingBotTimer = null; }
+  // ── 自动引用知识库 ──────────────────────────────────────────────────
+  function extractKeywords(text) {
+    var keywords = [];
+    var seen = {};
+    // 中文词（长度>=2）
+    var cnWords = text.match(/[\u4e00-\u9fa5]{2,}/g) || [];
+    for (var i = 0; i < cnWords.length; i++) {
+      var w = cnWords[i];
+      if (_autoKbStopWords.indexOf(w) >= 0) continue;
+      if (!seen[w]) { seen[w] = true; keywords.push(w); }
+    }
+    // 英文词（长度>=3）
+    var enWords = text.match(/[a-zA-Z]{3,}/g) || [];
+    for (var j = 0; j < enWords.length; j++) {
+      var ew = enWords[j].toLowerCase();
+      if (!seen[ew]) { seen[ew] = true; keywords.push(ew); }
+    }
+    return keywords;
+  }
+
+  function getObsidianVaultPath() {
+    // 尝试从全局变量获取
+    if (window.__OBSIDIAN_VAULT__ && typeof window.__OBSIDIAN_VAULT__ === 'string') {
+      return window.__OBSIDIAN_VAULT__;
+    }
+    // 尝试从现有的 Obsidian 模块获取
+    if (typeof window._obsidianVaultPath === 'string') {
+      return window._obsidianVaultPath;
+    }
+    // 尝试从 localStorage 获取缓存的路径
+    try {
+      var cached = localStorage.getItem('hdc_obsidian_vault');
+      if (cached) return cached;
+    } catch(e) {}
+    return null;
+  }
+
+  function rpcCall(method, params, callback) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { if (callback) callback({ error: 'WebSocket not open' }); return; }
+    var rid = String(++msgId);
+    _rpcCallbacks[rid] = callback || function(){};
+    ws.send(JSON.stringify({ jsonrpc: '2.0', id: rid, method: method, params: params || {} }));
+  }
+
+  function listDirRecursive(dirPath, onDone) {
+    var allFiles = [];
+    var pending = 1;
+    function checkDone() {
+      pending--;
+      if (pending === 0) onDone(allFiles);
+    }
+    function walk(dir) {
+      pending++;
+      rpcCall('fs.list_dir', { path: dir }, function(r) {
+        if (r.error || !r.entries) { checkDone(); return; }
+        var entries = r.entries;
+        for (var i = 0; i < entries.length; i++) {
+          var e = entries[i];
+          var fp = dir + '/' + e.name;
+          if (e.is_dir) {
+            walk(fp);
+          } else if (/\.md$/i.test(e.name)) {
+            allFiles.push(fp);
+          }
+        }
+        checkDone();
+      });
+    }
+    walk(dirPath);
+    checkDone();
+  }
+
+  function searchVaultFiles(keywords, onDone) {
+    var vaultPath = getObsidianVaultPath();
+    if (!vaultPath) {
+      // 尝试 notepad 目录作为 fallback
+      rpcCall('fs.list_dir', { path: 'notepad' }, function(r) {
+        if (r.error || !r.entries) { onDone([]); return; }
+        var files = [];
+        for (var i = 0; i < r.entries.length; i++) {
+          var e = r.entries[i];
+          if (!e.is_dir && /\.md$/i.test(e.name)) {
+            files.push('notepad/' + e.name);
+          }
+        }
+        filterFiles(files, keywords, onDone);
+      });
+      return;
+    }
+    listDirRecursive(vaultPath, function(files) {
+      filterFiles(files, keywords, onDone);
+    });
+  }
+
+  function filterFiles(filePaths, keywords, onDone) {
+    if (keywords.length === 0 || filePaths.length === 0) { onDone([]); return; }
+    var scored = [];
+    var pending = filePaths.length;
+    function checkDone() {
+      pending--;
+      if (pending > 0) return;
+      scored.sort(function(a, b) { return b.score - a.score; });
+      var result = [];
+      for (var i = 0; i < scored.length && i < _autoKbMaxFiles; i++) {
+        result.push(scored[i].path);
+      }
+      onDone(result);
+    }
+    for (var fi = 0; fi < filePaths.length; fi++) {
+      (function(fp) {
+        var fileName = fp.split(/[\\/]/).pop() || '';
+        var nameLower = fileName.toLowerCase();
+        var score = 0;
+        for (var ki = 0; ki < keywords.length; ki++) {
+          var kw = keywords[ki].toLowerCase();
+          if (nameLower.indexOf(kw) >= 0) score += 3;
+        }
+        if (score === 0) {
+          // 需要读取内容检查
+          rpcCall('fs.read_file', { path: fp, limit: 5000 }, function(r) {
+            if (!r.error && r.content) {
+              var contentLower = String(r.content).toLowerCase();
+              for (var kj = 0; kj < keywords.length; kj++) {
+                var kw2 = keywords[kj].toLowerCase();
+                if (contentLower.indexOf(kw2) >= 0) score += 1;
+              }
+            }
+            if (score > 0) scored.push({ path: fp, score: score });
+            checkDone();
+          });
+        } else {
+          scored.push({ path: fp, score: score });
+          checkDone();
+        }
+      })(filePaths[fi]);
+    }
+  }
+
+  function readFilesAndAttach(filePaths, onDone) {
+    if (filePaths.length === 0) { onDone([]); return; }
+    var results = [];
+    var pending = filePaths.length;
+    function checkDone() {
+      pending--;
+      if (pending === 0) onDone(results);
+    }
+    for (var i = 0; i < filePaths.length; i++) {
+      (function(fp) {
+        rpcCall('fs.read_file', { path: fp }, function(r) {
+          if (!r.error && r.content) {
+            var content = String(r.content);
+            if (content.length > _autoKbMaxChars) content = content.substring(0, _autoKbMaxChars) + '\n... (truncated)';
+            results.push({ path: fp, content: content });
+          }
+          checkDone();
+        });
+      })(filePaths[i]);
+    }
+  }
+
+  function _doSendInternal(text, extraAttachments, quotedNames) {
     var context = '';
-    if (attachments.length > 0) {
+    var allAttachments = attachments.concat(extraAttachments || []);
+    if (allAttachments.length > 0) {
       var parts = [];
       var folderParts = [];
       var fileParts = [];
-      for (var i = 0; i < attachments.length; i++) {
-        var att = attachments[i];
+      for (var i = 0; i < allAttachments.length; i++) {
+        var att = allAttachments[i];
         if (att.type === 'folder' && att.folderPath) {
-          // 文件夹类型
           var folderName = att.folderPath.split(/[\\/]/).pop() || att.title || '';
           folderParts.push('<folder name="' + hdcEscape(folderName) + '" path="' + hdcEscape(att.folderPath) + '" />');
         } else if (att.type === 'snippet' && att.content) {
@@ -1769,7 +1973,6 @@
           fileParts.push('<file name="' + hdcEscape(refName) + '" path="' + hdcEscape(att.filePath) + '" note="\u65e0\u6cd5\u52a0\u8f7d\u6587\u4ef6\u5185\u5bb9" />');
         }
       }
-      // 分别列出文件夹和文件
       if (folderParts.length > 0) {
         parts.push('\n<attached_folders count="' + folderParts.length + '">\n' + folderParts.join('\n') + '\n</attached_folders>');
       }
@@ -1779,7 +1982,11 @@
       if (parts.length) context = '\n\nThe user has attached the following content directly in this message. Do NOT use read_file or any other tool to re-read these files - the full content is already provided below:\n' + parts.join('\n');
     }
     var fullText = text + context;
-    addMsg(text + (attachments.length > 0 ? ' \u200b[' + attachments.length + '\u4e2a\u9644\u4ef6]' : ''), 'user');
+    var displayText = text;
+    if (quotedNames && quotedNames.length > 0) {
+      displayText += ' \ud83d\udcda \u5f15\u7528\u4e86' + quotedNames.map(function(n) { return '\u300a' + n + '\u300b'; }).join('');
+    }
+    addMsg(displayText + (allAttachments.length > 0 ? ' \u200b[' + allAttachments.length + '\u4e2a\u9644\u4ef6]' : ''), 'user');
     if (text && (inputHistory.length === 0 || inputHistory[inputHistory.length - 1] !== text)) {
       inputHistory.push(text);
       if (inputHistory.length > 100) inputHistory.shift();
@@ -1797,6 +2004,52 @@
       method: 'prompt.submit',
       params: { text: fullText, session_id: sessionId }
     }));
+  }
+
+  function doSend() {
+    if (!inpEl) return;
+    var text = inpEl.value.trim();
+    if (!text) return;
+    if (!ready) { if (statusEl) { statusEl.textContent = '\u7b49\u5f85\u8fde\u63a5\u5c31\u7eea...'; statusEl.style.color = 'var(--hdc-fg-dim)'; } return; }
+    if (sending) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) { if (statusEl) { statusEl.textContent = '\u8fde\u63a5\u65ad\u5f00\uff0c\u6b63\u5728\u91cd\u8fde...'; statusEl.style.color = T.red; } return; }
+    pendingBotMsgs = [];
+    if (pendingBotTimer) { clearTimeout(pendingBotTimer); pendingBotTimer = null; }
+
+    // 自动引用知识库流程
+    if (_autoKbEnabled) {
+      var keywords = extractKeywords(text);
+      if (keywords.length > 0 && statusEl) {
+        statusEl.textContent = '\u6b63\u5728\u641c\u7d22\u77e5\u8bc6\u5e93...';
+      }
+      searchVaultFiles(keywords, function(filePaths) {
+        if (filePaths.length === 0) {
+          _doSendInternal(text, [], []);
+          return;
+        }
+        if (statusEl) statusEl.textContent = '\u6b63\u5728\u8bfb\u53d6 ' + filePaths.length + ' \u4e2a\u7b14\u8bb0...';
+        readFilesAndAttach(filePaths, function(results) {
+          var extraAttachments = [];
+          var quotedNames = [];
+          for (var i = 0; i < results.length; i++) {
+            var r = results[i];
+            var name = r.path.split(/[\\/]/).pop() || r.path;
+            extraAttachments.push({
+              type: 'file',
+              filePath: r.path,
+              fileName: name,
+              lang: 'markdown',
+              content: r.content
+            });
+            quotedNames.push(name.replace(/\.md$/i, ''));
+          }
+          _doSendInternal(text, extraAttachments, quotedNames);
+        });
+      });
+      return;
+    }
+
+    _doSendInternal(text, [], []);
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────
