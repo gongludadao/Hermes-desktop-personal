@@ -29,9 +29,10 @@
         dualPanel: opts.dualPanel || null,
         rpc: opts.rpc || null,
         isEditMode: false,
-        diffMode: false,
-        diffOriginal: '',
-        originalContent: opts.content || ''
+        originalContent: opts.content || '',
+        scrollTop: 0,
+        selectionStart: 0,
+        selectionEnd: 0
       };
       _editorTabs.push(tab);
       _renderTabs();
@@ -55,6 +56,22 @@
     }
 
     function _switchToTab(tabId) {
+      // 保存当前标签页的状态
+      if (_activeTabId) {
+        var currentTab = _editorTabs.find(function(t) { return t.id === _activeTabId; });
+        if (currentTab) {
+          // 保存编辑模式状态
+          currentTab.isEditMode = isEditMode;
+          // 保存编辑器状态
+          if (isEditMode) {
+            currentTab.scrollTop = editorTextarea.scrollTop;
+            currentTab.selectionStart = editorTextarea.selectionStart;
+            currentTab.selectionEnd = editorTextarea.selectionEnd;
+            currentTab.content = editorTextarea.value;
+          }
+        }
+      }
+      
       var tab = _editorTabs.find(function(t) { return t.id === tabId; });
       if (!tab) return;
       _activeTabId = tabId;
@@ -68,28 +85,36 @@
       currentFileContent = tab.content;
       _originalContent = tab.originalContent;
       _currentDualPanel = tab.dualPanel;
-      diffOriginal = tab.diffOriginal;
-      diffMode = tab.diffMode;
-      isEditMode = tab.isEditMode;
+      isEditMode = tab.isEditMode || false;
 
       editorFilename.textContent = tab.title;
       editorTextarea.value = tab.content;
+      
+      // 恢复滚动位置和选中状态
+      if (isEditMode) {
+        editorTextarea.scrollTop = tab.scrollTop || 0;
+        editorTextarea.selectionStart = tab.selectionStart || 0;
+        editorTextarea.selectionEnd = tab.selectionEnd || 0;
+      }
 
-      diffOverlay.style.display = diffMode ? '' : 'none';
-      diffActionBar.style.display = diffMode ? '' : 'none';
-      diffBtn.style.display = tab.editable ? '' : 'none';
       editBtn.textContent = isEditMode ? '预览' : '编辑';
       editBtn.style.color = isEditMode ? 'var(--hdc-accent)' : 'var(--hdc-fg-dim)';
       editBtn.style.borderColor = isEditMode ? 'var(--hdc-accent)' : 'var(--hdc-border)';
       editBtn.style.display = tab.editable ? '' : 'none';
-      document.getElementById('hdc-editor-save').style.display = 'none';
+      document.getElementById('hdc-editor-save').style.display = isEditMode ? '' : 'none';
 
       if (isEditMode) {
         editorTextarea.style.display = '';
         editorPreview.style.display = 'none';
+        // 显示工具栏
+        var toolbar = document.getElementById('hdc-editor-toolbar');
+        if (toolbar) toolbar.style.display = 'flex';
       } else {
         editorTextarea.style.display = 'none';
         editorPreview.style.display = '';
+        // 隐藏工具栏
+        var toolbar = document.getElementById('hdc-editor-toolbar');
+        if (toolbar) toolbar.style.display = 'none';
         if (tab.dualPanel) {
           renderDualPanel(tab.dualPanel);
         } else if (tab.rawHtml !== null) {
@@ -237,7 +262,6 @@
           if (updated.editable === false) {
             tab.editable = false;
             editBtn.style.display = 'none';
-            diffBtn.style.display = 'none';
           }
           if (updated.dualPanel) {
             tab.dualPanel = updated.dualPanel;
@@ -272,10 +296,6 @@
       currentFileContent = '';
       _currentDualPanel = null;
       _originalContent = '';
-      diffMode = false;
-      diffOriginal = '';
-      diffOverlay.style.display = 'none';
-      diffActionBar.style.display = 'none';
       if (_autoSaveTimer) { clearTimeout(_autoSaveTimer); _autoSaveTimer = null; }
       if (_refreshTimer) { clearTimeout(_refreshTimer); _refreshTimer = null; }
       if (editorResizerEl) editorResizerEl.style.display = 'none';
@@ -520,14 +540,6 @@
       // ✅ 显示工具栏
       var toolbar = document.getElementById('hdc-editor-toolbar');
       if (toolbar) toolbar.style.display = 'flex';
-      if (diffMode) {
-        diffMode = false;
-        if (tab) tab.diffMode = false;
-        diffBtn.textContent = '\u5bf9\u6bd4';
-        diffBtn.style.background = 'transparent';
-        diffBtn.style.color = 'var(--hdc-accent)';
-        hideDiffView();
-      }
     }
 
     function exitEditMode() {
@@ -859,7 +871,13 @@
       });
     }
 
-    var diffBtn = document.getElementById('hdc-editor-diff');
+    // Diff功能（对比按钮已移除，但功能保留）
+    var diffMode = false;
+    var diffOriginal = '';
+    var _preDiffEditMode = false;  // 进入diff前的编辑/预览模式
+    var _preDiffScrollTop = 0;    // 进入diff前的滚动位置
+    var _preDiffSaved = false;    // 是否已保存进入diff前的状态
+    
     var diffOverlay = document.createElement('div');
     diffOverlay.id = 'hdc-diff-overlay';
     diffOverlay.style.cssText = 'display:none;position:absolute;top:0;left:0;right:0;bottom:44px;overflow-y:auto;font-family:var(--hdc-mono);font-size:13px;line-height:1.6;z-index:5';
@@ -887,14 +905,10 @@
       _originalContent = newContent;
       diffOriginal = '';
       diffMode = false;
-      diffBtn.textContent = '\u5bf9\u6bd4';
-      diffBtn.style.background = 'transparent';
-      diffBtn.style.color = 'var(--hdc-accent)';
+      confirmedDiffBlocks = {};
       hideDiffView();
       var ext = getFileExt(currentFilePath || '');
       renderPreview(newContent, ext || 'md', currentFilePath);
-      var label = currentFilePath ? currentFilePath.split(/[\\/]/).pop() : (currentNoteId ? '\u7b14\u8bb0' : '');
-      if (label) addMsg('\u2713 \u5df2\u786e\u8ba4\u66f4\u6539: ' + hdcEscape(label), 'sys');
     };
 
     diffRevertBtn.onclick = function() {
@@ -905,14 +919,10 @@
       _originalContent = revertContent;
       diffOriginal = '';
       diffMode = false;
-      diffBtn.textContent = '\u5bf9\u6bd4';
-      diffBtn.style.background = 'transparent';
-      diffBtn.style.color = 'var(--hdc-accent)';
+      confirmedDiffBlocks = {};
       hideDiffView();
       var ext = getFileExt(currentFilePath || '');
       renderPreview(revertContent, ext || 'md', currentFilePath);
-      var label = currentFilePath ? currentFilePath.split(/[\\/]/).pop() : (currentNoteId ? '\u7b14\u8bb0' : '');
-      if (label) addMsg('\u21a9 \u5df2\u64a4\u56de\u66f4\u6539: ' + hdcEscape(label), 'sys');
     };
 
     function computeDiff(oldText, newText) {
@@ -920,35 +930,79 @@
       var newLines = newText.split('\n');
       var result = [];
       var oi = 0, ni = 0;
+      
       while (oi < oldLines.length || ni < newLines.length) {
         if (oi < oldLines.length && ni < newLines.length) {
           if (oldLines[oi] === newLines[ni]) {
             result.push({ type: 'equal', oldLine: oi + 1, newLine: ni + 1, text: oldLines[oi] });
             oi++; ni++;
           } else {
-            var foundInNew = -1;
-            for (var s = ni + 1; s < Math.min(ni + 5, newLines.length); s++) {
-              if (newLines[s] === oldLines[oi]) { foundInNew = s; break; }
+            var removeCount = 0;
+            var addCount = 0;
+            var tempOi = oi;
+            var tempNi = ni;
+            
+            var maxLookahead = 20;
+            while (tempOi < oldLines.length && tempNi < newLines.length && 
+                   oldLines[tempOi] !== newLines[tempNi] && 
+                   removeCount + addCount < maxLookahead) {
+              var foundInNew = false;
+              for (var s = ni; s < Math.min(ni + maxLookahead, newLines.length); s++) {
+                if (newLines[s] === oldLines[tempOi]) { foundInNew = true; break; }
+              }
+              var foundInOld = false;
+              for (var s2 = oi; s2 < Math.min(oi + maxLookahead, oldLines.length); s2++) {
+                if (oldLines[s2] === newLines[tempNi]) { foundInOld = true; break; }
+              }
+              
+              if (!foundInNew && foundInOld) {
+                removeCount++;
+                tempOi++;
+              } else if (foundInNew && !foundInOld) {
+                addCount++;
+                tempNi++;
+              } else {
+                removeCount++;
+                addCount++;
+                tempOi++;
+                tempNi++;
+              }
             }
-            if (foundInNew >= 0) {
-              while (ni < foundInNew) {
+            
+            if (removeCount > 0 || addCount > 0) {
+              for (var r = 0; r < removeCount && oi < oldLines.length; r++) {
+                result.push({ type: 'remove', oldLine: oi + 1, text: oldLines[oi] });
+                oi++;
+              }
+              for (var a = 0; a < addCount && ni < newLines.length; a++) {
                 result.push({ type: 'add', newLine: ni + 1, text: newLines[ni] });
                 ni++;
               }
             } else {
-              var foundInOld = -1;
-              for (var s2 = oi + 1; s2 < Math.min(oi + 5, oldLines.length); s2++) {
-                if (oldLines[s2] === newLines[ni]) { foundInOld = s2; break; }
+              var foundInNew = -1;
+              for (var s = ni + 1; s < Math.min(ni + 5, newLines.length); s++) {
+                if (newLines[s] === oldLines[oi]) { foundInNew = s; break; }
               }
-              if (foundInOld >= 0) {
-                while (oi < foundInOld) {
-                  result.push({ type: 'remove', oldLine: oi + 1, text: oldLines[oi] });
-                  oi++;
+              if (foundInNew >= 0) {
+                while (ni < foundInNew) {
+                  result.push({ type: 'add', newLine: ni + 1, text: newLines[ni] });
+                  ni++;
                 }
               } else {
-                result.push({ type: 'remove', oldLine: oi + 1, text: oldLines[oi] });
-                result.push({ type: 'add', newLine: ni + 1, text: newLines[ni] });
-                oi++; ni++;
+                var foundInOld = -1;
+                for (var s2 = oi + 1; s2 < Math.min(oi + 5, oldLines.length); s2++) {
+                  if (oldLines[s2] === newLines[ni]) { foundInOld = s2; break; }
+                }
+                if (foundInOld >= 0) {
+                  while (oi < foundInOld) {
+                    result.push({ type: 'remove', oldLine: oi + 1, text: oldLines[oi] });
+                    oi++;
+                  }
+                } else {
+                  result.push({ type: 'remove', oldLine: oi + 1, text: oldLines[oi] });
+                  result.push({ type: 'add', newLine: ni + 1, text: newLines[ni] });
+                  oi++; ni++;
+                }
               }
             }
           }
@@ -963,63 +1017,544 @@
       return result;
     }
 
-    function renderDiff(diffResult) {
+    var diffBlockStates = {};
+    var diffBlockData = {};
+    var diffBlockIdCounter = 0;
+    var confirmedDiffBlocks = {}; // blockId → true  (confirmed, skip on re-render)
+
+    function renderDiff(diffResult, confirmedBlockIds) {
+      confirmedBlockIds = confirmedBlockIds || {};
       var html = '';
-      for (var i = 0; i < diffResult.length; i++) {
+      diffBlockData = {};
+      diffBlockStates = {};
+      diffBlockIdCounter = 0;
+      
+      var blocks = [];
+      var i = 0;
+      while (i < diffResult.length) {
         var d = diffResult[i];
-        var lineNum = d.type === 'remove' ? d.oldLine : d.newLine;
-        var prefix = d.type === 'add' ? '+' : d.type === 'remove' ? '-' : ' ';
-        var bgColor = d.type === 'add' ? 'rgba(80,200,120,0.15)' : d.type === 'remove' ? 'rgba(220,80,80,0.15)' : 'transparent';
-        var fgColor = d.type === 'add' ? '#6ece6e' : d.type === 'remove' ? '#e06060' : 'var(--hdc-fg)';
-        var lineNumStr = (lineNum || '').toString();
-        var escapedText = hdcEscape(d.text);
-        html += '<div style="background:' + bgColor + ';padding:0 8px;white-space:pre;display:flex;min-height:20px;align-items:center">';
-        html += '<span style="color:var(--hdc-fg-dim);min-width:36px;text-align:right;padding-right:8px;flex-shrink:0;font-size:11px">' + lineNumStr + '</span>';
-        html += '<span style="color:' + fgColor + ';flex-shrink:0;width:16px">' + hdcEscape(prefix) + '</span>';
-        html += '<span style="color:' + fgColor + '">' + escapedText + '</span>';
-        html += '</div>';
+        
+        if (d.type === 'remove') {
+          var removeBlock = [];
+          var addBlock = [];
+          
+          while (i < diffResult.length && diffResult[i].type === 'remove') {
+            removeBlock.push(diffResult[i]);
+            i++;
+          }
+          
+          // 限制 add 数量（最多 remove 的 5 倍），避免贪婪吞掉后续独立 add 块
+          var maxAdds = removeBlock.length * 5;
+          while (i < diffResult.length && diffResult[i].type === 'add' && addBlock.length < maxAdds) {
+            addBlock.push(diffResult[i]);
+            i++;
+          }
+          
+          if (removeBlock.length > 0) {
+            blocks.push({
+              type: 'change',
+              removes: removeBlock,
+              adds: addBlock
+            });
+          }
+        } else if (d.type === 'add') {
+          var addBlock = [];
+          while (i < diffResult.length && diffResult[i].type === 'add') {
+            addBlock.push(diffResult[i]);
+            i++;
+          }
+          blocks.push({
+            type: 'add',
+            adds: addBlock
+          });
+        } else {
+          blocks.push({
+            type: 'equal',
+            line: d
+          });
+          i++;
+        }
+      }
+      
+      for (var j = 0; j < blocks.length; j++) {
+        var block = blocks[j];
+        
+        if (block.type === 'equal') {
+          var d = block.line;
+          var lineNum = d.oldLine;
+          var escapedText = hdcEscape(d.text);
+          html += '<div style="padding:0 8px;white-space:pre;display:flex;min-height:20px;align-items:center">';
+          html += '<span style="color:var(--hdc-fg-dim);min-width:36px;text-align:right;padding-right:8px;flex-shrink:0;font-size:11px">' + lineNum + '</span>';
+          html += '<span style="color:var(--hdc-fg-dim);flex-shrink:0;width:16px"> </span>';
+          html += '<span style="color:var(--hdc-fg)">' + escapedText + '</span>';
+          html += '</div>';
+        } else if (block.type === 'add') {
+          var blockId = 'diff-block-' + diffBlockIdCounter++;
+          diffBlockStates[blockId] = 'pending';
+          diffBlockData[blockId] = { type: 'add', adds: block.adds };
+          
+          var newStartLine = block.adds[0].newLine;
+          var newEndLine = block.adds[block.adds.length - 1].newLine;
+          
+          html += '<div id="' + blockId + '" class="diff-block" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.1);border-left:3px solid #6ece6e;padding:4px 8px;margin:2px 0;font-size:11px;display:flex;justify-content:space-between;align-items:center">';
+          html += '<span style="color:var(--hdc-fg-dim)">';
+          html += '\u2795 \u65b0\u589e: \u884c ' + newStartLine;
+          if (block.adds.length > 1) {
+            html += '-' + newEndLine;
+          }
+          html += ' (' + block.adds.length + ' \u884c)';
+          html += '</span>';
+          html += '<span class="diff-block-actions" style="display:flex;gap:4px;">';
+          html += '<button class="diff-btn-confirm" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.3);border:none;color:#6ece6e;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">\u2713</button>';
+          html += '<button class="diff-btn-revert" data-block-id="' + blockId + '" style="background:rgba(220,80,80,0.3);border:none;color:#e06060;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">\u2716</button>';
+          html += '</span>';
+          html += '</div>';
+          
+          for (var k = 0; k < block.adds.length; k++) {
+            var d = block.adds[k];
+            var escapedText = hdcEscape(d.text);
+            html += '<div class="diff-block-content" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.15);padding:0 8px;white-space:pre;display:flex;min-height:20px;align-items:center">';
+            html += '<span style="color:var(--hdc-fg-dim);min-width:36px;text-align:right;padding-right:8px;flex-shrink:0;font-size:11px">' + d.newLine + '</span>';
+            html += '<span style="color:#6ece6e;flex-shrink:0;width:16px">+</span>';
+            html += '<span style="color:#6ece6e">' + escapedText + '</span>';
+            html += '</div>';
+          }
+        } else if (block.type === 'change') {
+          var hasRemove = block.removes.length > 0;
+          var hasAdd = block.adds.length > 0;
+          var blockId = 'diff-block-' + diffBlockIdCounter++;
+          diffBlockStates[blockId] = 'pending';
+          diffBlockData[blockId] = { type: 'change', removes: block.removes, adds: block.adds };
+          
+          if (hasRemove && hasAdd) {
+            var oldStartLine = block.removes[0].oldLine;
+            var oldEndLine = block.removes[block.removes.length - 1].oldLine;
+            var newStartLine = block.adds[0].newLine;
+            var newEndLine = block.adds[block.adds.length - 1].newLine;
+            
+            html += '<div id="' + blockId + '" class="diff-block" data-block-id="' + blockId + '" style="background:rgba(255,200,80,0.1);border-left:3px solid #f0a020;padding:4px 8px;margin:2px 0;font-size:11px;display:flex;justify-content:space-between;align-items:center">';
+            html += '<span style="color:var(--hdc-fg-dim)">';
+            html += '\ud83d\udcc4 \u4fee\u6539\u5757: \u884c ' + oldStartLine;
+            if (block.removes.length > 1) {
+              html += '-' + oldEndLine;
+            }
+            html += ' \u2192 \u884c ' + newStartLine;
+            if (block.adds.length > 1) {
+              html += '-' + newEndLine;
+            }
+            html += ' (' + block.removes.length + ' \u884c\u2192' + block.adds.length + ' \u884c)';
+            html += '</span>';
+            html += '<span class="diff-block-actions" style="display:flex;gap:4px;">';
+            html += '<button class="diff-btn-confirm" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.3);border:none;color:#6ece6e;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">\u2713</button>';
+            html += '<button class="diff-btn-revert" data-block-id="' + blockId + '" style="background:rgba(220,80,80,0.3);border:none;color:#e06060;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">\u21a9</button>';
+            html += '</span>';
+            html += '</div>';
+            
+            html += '<div class="diff-block-content" data-block-id="' + blockId + '" style="background:rgba(220,80,80,0.08);padding:2px 8px;border-left:3px solid #e06060">';
+            for (var k = 0; k < block.removes.length; k++) {
+              var d = block.removes[k];
+              var escapedText = hdcEscape(d.text);
+              html += '<div style="white-space:pre;display:flex;min-height:20px;align-items:center">';
+              html += '<span style="color:var(--hdc-fg-dim);min-width:36px;text-align:right;padding-right:8px;flex-shrink:0;font-size:11px">' + d.oldLine + '</span>';
+              html += '<span style="color:#e06060;flex-shrink:0;width:16px">-</span>';
+              html += '<span style="color:#e06060">' + escapedText + '</span>';
+              html += '</div>';
+            }
+            html += '</div>';
+            
+            html += '<div class="diff-block-content" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.08);padding:2px 8px;border-left:3px solid #6ece6e">';
+            for (var k = 0; k < block.adds.length; k++) {
+              var d = block.adds[k];
+              var escapedText = hdcEscape(d.text);
+              html += '<div style="white-space:pre;display:flex;min-height:20px;align-items:center">';
+              html += '<span style="color:var(--hdc-fg-dim);min-width:36px;text-align:right;padding-right:8px;flex-shrink:0;font-size:11px">' + d.newLine + '</span>';
+              html += '<span style="color:#6ece6e;flex-shrink:0;width:16px">+</span>';
+              html += '<span style="color:#6ece6e">' + escapedText + '</span>';
+              html += '</div>';
+            }
+            html += '</div>';
+          } else if (hasRemove) {
+            var oldStartLine = block.removes[0].oldLine;
+            var oldEndLine = block.removes[block.removes.length - 1].oldLine;
+            
+            html += '<div id="' + blockId + '" class="diff-block" data-block-id="' + blockId + '" style="background:rgba(220,80,80,0.1);border-left:3px solid #e06060;padding:4px 8px;margin:2px 0;font-size:11px;display:flex;justify-content:space-between;align-items:center">';
+            html += '<span style="color:var(--hdc-fg-dim)">';
+            html += '\u2716 \u5220\u9664: \u884c ' + oldStartLine;
+            if (block.removes.length > 1) {
+              html += '-' + oldEndLine;
+            }
+            html += ' (' + block.removes.length + ' \u884c)';
+            html += '</span>';
+            html += '<span class="diff-block-actions" style="display:flex;gap:4px;">';
+            html += '<button class="diff-btn-confirm" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.3);border:none;color:#6ece6e;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">\u2713</button>';
+            html += '<button class="diff-btn-revert" data-block-id="' + blockId + '" style="background:rgba(100,150,220,0.3);border:none;color:#6496dc;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">\u21a9</button>';
+            html += '</span>';
+            html += '</div>';
+            
+            for (var k = 0; k < block.removes.length; k++) {
+              var d = block.removes[k];
+              var escapedText = hdcEscape(d.text);
+              html += '<div class="diff-block-content" data-block-id="' + blockId + '" style="background:rgba(220,80,80,0.15);padding:0 8px;white-space:pre;display:flex;min-height:20px;align-items:center">';
+              html += '<span style="color:var(--hdc-fg-dim);min-width:36px;text-align:right;padding-right:8px;flex-shrink:0;font-size:11px">' + d.oldLine + '</span>';
+              html += '<span style="color:#e06060;flex-shrink:0;width:16px">-</span>';
+              html += '<span style="color:#e06060">' + escapedText + '</span>';
+              html += '</div>';
+            }
+          } else if (hasAdd) {
+            var newStartLine = block.adds[0].newLine;
+            var newEndLine = block.adds[block.adds.length - 1].newLine;
+            
+            html += '<div id="' + blockId + '" class="diff-block" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.1);border-left:3px solid #6ece6e;padding:4px 8px;margin:2px 0;font-size:11px;display:flex;justify-content:space-between;align-items:center">';
+            html += '<span style="color:var(--hdc-fg-dim)">';
+            html += '\u2795 \u65b0\u589e: \u884c ' + newStartLine;
+            if (block.adds.length > 1) {
+              html += '-' + newEndLine;
+            }
+            html += ' (' + block.adds.length + ' \u884c)';
+            html += '</span>';
+            html += '<span class="diff-block-actions" style="display:flex;gap:4px;">';
+            html += '<button class="diff-btn-confirm" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.3);border:none;color:#6ece6e;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">\u2713</button>';
+            html += '<button class="diff-btn-revert" data-block-id="' + blockId + '" style="background:rgba(220,80,80,0.3);border:none;color:#e06060;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">\u2716</button>';
+            html += '</span>';
+            html += '</div>';
+            
+            for (var k = 0; k < block.adds.length; k++) {
+              var d = block.adds[k];
+              var escapedText = hdcEscape(d.text);
+              html += '<div class="diff-block-content" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.15);padding:0 8px;white-space:pre;display:flex;min-height:20px;align-items:center">';
+              html += '<span style="color:var(--hdc-fg-dim);min-width:36px;text-align:right;padding-right:8px;flex-shrink:0;font-size:11px">' + d.newLine + '</span>';
+              html += '<span style="color:#6ece6e;flex-shrink:0;width:16px">+</span>';
+              html += '<span style="color:#6ece6e">' + escapedText + '</span>';
+              html += '</div>';
+            }
+          }
+        }
       }
       return html;
+    }
+    
+    function confirmDiffBlock(blockId) {
+      if (diffBlockStates[blockId] !== 'pending') return;
+
+      // 确认修改：标记为已确认
+      diffBlockStates[blockId] = 'confirmed';
+      confirmedDiffBlocks[blockId] = true;
+
+      var blockData = diffBlockData[blockId];
+
+      // 隐藏头部栏（标题+按钮）
+      var blockEl = document.getElementById(blockId);
+      if (blockEl) { blockEl.style.display = 'none'; }
+
+      // 隐藏删除内容（红色部分），保留新增内容并改为普通文本样式
+      var contentEls = diffOverlay.querySelectorAll('.diff-block-content[data-block-id="' + blockId + '"]');
+      contentEls.forEach(function(el) {
+        // 判断是否为删除内容：包含红色 - 标记的子元素
+        var minusSpans = el.querySelectorAll('span[style*="color:#e06060"]');
+        var plusSpans = el.querySelectorAll('span[style*="color:#6ece6e"]');
+        if (minusSpans.length > 0 && plusSpans.length === 0) {
+          // 纯删除内容，隐藏
+          el.style.display = 'none';
+        } else if (plusSpans.length > 0) {
+          // 包含新增内容，改为普通文本样式
+          el.style.background = 'transparent';
+          el.style.borderLeft = 'none';
+          el.style.padding = '0 8px';
+          el.querySelectorAll('span[style*="color:#6ece6e"]').forEach(function(s) {
+            s.style.color = 'var(--hdc-fg)';
+          });
+          el.querySelectorAll('span[style*="color:var(--hdc-fg-dim)"]').forEach(function(s) {
+            // 保留行号颜色不变
+          });
+        }
+      });
+
+      // 检查是否所有修改块都已处理
+      var allProcessed = true;
+      for (var id in diffBlockStates) {
+        if (diffBlockStates[id] === 'pending') {
+          allProcessed = false;
+          break;
+        }
+      }
+
+      // 如果所有修改块都已处理，退出diff模式
+      if (allProcessed) {
+        _originalContent = editorTextarea.value;
+        diffOriginal = '';
+        diffMode = false;
+        confirmedDiffBlocks = {};
+        hideDiffView();
+      }
+    }
+    
+    function revertDiffBlock(blockId) {
+      if (diffBlockStates[blockId] !== 'pending') return;
+      
+      var blockData = diffBlockData[blockId];
+      if (!blockData) return;
+      
+      // 获取当前编辑器内容
+      var currentLines = editorTextarea.value.split('\n');
+      var newLines = [];
+      
+      if (blockData.type === 'change') {
+        // 撤回修改：删除新增的行，恢复删除的行
+        var addTexts = blockData.adds.map(function(a) { return a.text; });
+        var removeTexts = blockData.removes.map(function(r) { return r.text; });
+        
+        // 找到新增内容在当前编辑器中的位置（从后往前找，避免行号变化影响）
+        var addStartIdx = -1;
+        for (var i = currentLines.length - addTexts.length; i >= 0; i--) {
+          var match = true;
+          for (var j = 0; j < addTexts.length; j++) {
+            if (currentLines[i + j] !== addTexts[j]) {
+              match = false;
+              break;
+            }
+          }
+          if (match) {
+            addStartIdx = i;
+            break;
+          }
+        }
+        
+        // 如果没找到匹配，使用原始行号
+        if (addStartIdx === -1) {
+          addStartIdx = blockData.adds[0].newLine - 1;
+        }
+        
+        // 构建新内容
+        for (var i = 0; i < currentLines.length; i++) {
+          if (i >= addStartIdx && i < addStartIdx + addTexts.length) {
+            // 这是新增的行，跳过（不加入newLines）
+            continue;
+          }
+          newLines.push(currentLines[i]);
+        }
+        
+        // 在删除位置插入原来的行
+        if (removeTexts.length > 0) {
+          // 在addStartIdx位置插入原来的行
+          var before = newLines.slice(0, addStartIdx);
+          var after = newLines.slice(addStartIdx);
+          newLines = before.concat(removeTexts).concat(after);
+        }
+        
+        editorTextarea.value = newLines.join('\n');
+      } else if (blockData.type === 'add') {
+        // 撤回新增：删除新增的行
+        var addTexts = blockData.adds.map(function(a) { return a.text; });
+        
+        // 找到新增内容在当前编辑器中的位置（从后往前找）
+        var addStartIdx = -1;
+        for (var i = currentLines.length - addTexts.length; i >= 0; i--) {
+          var match = true;
+          for (var j = 0; j < addTexts.length; j++) {
+            if (currentLines[i + j] !== addTexts[j]) {
+              match = false;
+              break;
+            }
+          }
+          if (match) {
+            addStartIdx = i;
+            break;
+          }
+        }
+        
+        // 如果没找到匹配，使用原始行号
+        if (addStartIdx === -1) {
+          addStartIdx = blockData.adds[0].newLine - 1;
+        }
+        
+        // 删除新增的行
+        for (var i = 0; i < currentLines.length; i++) {
+          if (i >= addStartIdx && i < addStartIdx + addTexts.length) {
+            continue;
+          }
+          newLines.push(currentLines[i]);
+        }
+        
+        editorTextarea.value = newLines.join('\n');
+      }
+      
+      diffBlockStates[blockId] = 'reverted';
+      
+      // 从DOM中隐藏该修改块的所有元素（不影响其他块）
+      var blockEl = document.getElementById(blockId);
+      if (blockEl) { blockEl.style.display = 'none'; }
+      var contentEls = diffOverlay.querySelectorAll('.diff-block-content[data-block-id="' + blockId + '"]');
+      contentEls.forEach(function(el) { el.style.display = 'none'; });
+      
+      // 检查是否所有修改块都已处理
+      var allProcessed = true;
+      for (var id in diffBlockStates) {
+        if (diffBlockStates[id] === 'pending') {
+          allProcessed = false;
+          break;
+        }
+      }
+      
+      // 如果所有修改块都已处理，退出diff模式
+      if (allProcessed) {
+        _originalContent = editorTextarea.value;
+        diffOriginal = '';
+        diffMode = false;
+        confirmedDiffBlocks = {};
+        hideDiffView();
+      }
+    }
+
+    function bindDiffButtonEvents() {
+      diffOverlay.querySelectorAll('.diff-btn-confirm').forEach(function(btn) {
+        btn.onclick = function(e) {
+          e.stopPropagation();
+          var blockId = this.getAttribute('data-block-id');
+          confirmDiffBlock(blockId);
+        };
+      });
+      
+      diffOverlay.querySelectorAll('.diff-btn-revert').forEach(function(btn) {
+        btn.onclick = function(e) {
+          e.stopPropagation();
+          var blockId = this.getAttribute('data-block-id');
+          revertDiffBlock(blockId);
+        };
+      });
+      
+      diffOverlay.querySelectorAll('.diff-block').forEach(function(block) {
+        block.onclick = function(e) {
+          if (e.target.tagName === 'BUTTON') return;
+          diffOverlay.querySelectorAll('.diff-block').forEach(function(b) {
+            b.style.outline = '';
+          });
+          this.style.outline = '2px solid var(--hdc-accent)';
+        };
+      });
+    }
+    
+    function handleDiffKeydown(e) {
+      if (!diffMode) return;
+      
+      if (e.key === 'Enter' && !e.ctrlKey) {
+        var highlighted = diffOverlay.querySelector('.diff-block[style*="outline"]');
+        if (highlighted) {
+          var blockId = highlighted.getAttribute('data-block-id');
+          confirmDiffBlock(blockId);
+          e.preventDefault();
+        }
+      } else if (e.key === 'Enter' && e.ctrlKey) {
+        for (var blockId in diffBlockStates) {
+          if (diffBlockStates[blockId] === 'pending') {
+            confirmDiffBlock(blockId);
+          }
+        }
+        e.preventDefault();
+      } else if (e.key === 'Delete' || e.key === 'Backspace') {
+        var highlighted = diffOverlay.querySelector('.diff-block[style*="outline"]');
+        if (highlighted) {
+          var blockId = highlighted.getAttribute('data-block-id');
+          revertDiffBlock(blockId);
+        }
+      }
+      
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        var blocks = Array.from(diffOverlay.querySelectorAll('.diff-block'));
+        var highlighted = diffOverlay.querySelector('.diff-block[style*="outline"]');
+        var currentIndex = highlighted ? blocks.indexOf(highlighted) : -1;
+        
+        blocks.forEach(function(b) { b.style.outline = ''; });
+        
+        var nextIndex;
+        if (e.key === 'ArrowDown') {
+          nextIndex = currentIndex < blocks.length - 1 ? currentIndex + 1 : 0;
+        } else {
+          nextIndex = currentIndex > 0 ? currentIndex - 1 : blocks.length - 1;
+        }
+        
+        if (blocks[nextIndex]) {
+          blocks[nextIndex].style.outline = '2px solid var(--hdc-accent)';
+          blocks[nextIndex].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        
+        e.preventDefault();
+      }
+      
+      if (e.key === 'Escape') {
+        hideDiffView();
+        diffMode = false;
+        confirmedDiffBlocks = {};
+      }
     }
 
     function showDiffView() {
       if (!diffMode) return;
+
+      // 首次进入diff时保存当前状态
+      if (!_preDiffSaved) {
+        _preDiffEditMode = !!isEditMode;
+        if (isEditMode) {
+          _preDiffScrollTop = editorTextarea.scrollTop;
+        } else {
+          _preDiffScrollTop = editorPreview.scrollTop || 0;
+        }
+        _preDiffSaved = true;
+      }
+
       var diffResult = computeDiff(diffOriginal, editorTextarea.value);
-      diffOverlay.innerHTML = renderDiff(diffResult);
+      diffOverlay.innerHTML = renderDiff(diffResult, confirmedDiffBlocks);
       diffOverlay.style.display = 'block';
       diffActionBar.style.display = 'flex';
       editorPreview.style.display = 'none';
       editorTextarea.style.display = 'none';
+      // 进入diff时隐藏工具栏，避免与diff视图重叠
+      var toolbar = document.getElementById('hdc-editor-toolbar');
+      if (toolbar) toolbar.style.display = 'none';
+      bindDiffButtonEvents();
+      document.addEventListener('keydown', handleDiffKeydown);
     }
 
     function hideDiffView() {
       diffOverlay.style.display = 'none';
       diffActionBar.style.display = 'none';
-      if (isEditMode) {
+      document.removeEventListener('keydown', handleDiffKeydown);
+
+      // 恢复进入diff前的模式
+      if (_preDiffEditMode) {
+        // 恢复编辑模式
+        isEditMode = true;
         editorTextarea.style.display = '';
+        editorPreview.style.display = 'none';
+        var toolbar = document.getElementById('hdc-editor-toolbar');
+        if (toolbar) toolbar.style.display = 'flex';
+        editBtn.textContent = '预览';
+        editBtn.style.color = 'var(--hdc-accent)';
+        editBtn.style.borderColor = 'var(--hdc-accent)';
+        document.getElementById('hdc-editor-save').style.display = '';
+        // 恢复滚动位置
+        editorTextarea.scrollTop = _preDiffScrollTop;
       } else {
+        // 恢复预览模式
+        isEditMode = false;
+        editorTextarea.style.display = 'none';
         editorPreview.style.display = '';
+        var toolbar = document.getElementById('hdc-editor-toolbar');
+        if (toolbar) toolbar.style.display = 'none';
+        editBtn.textContent = '编辑';
+        editBtn.style.color = 'var(--hdc-fg-dim)';
+        editBtn.style.borderColor = 'var(--hdc-border)';
+        document.getElementById('hdc-editor-save').style.display = 'none';
+        // 渲染预览并恢复滚动位置
+        var ext = getFileExt(currentFilePath || '');
+        renderPreview(editorTextarea.value, ext || 'md', currentFilePath);
+        editorPreview.scrollTop = _preDiffScrollTop;
       }
+
+      // 重置保存状态
+      _preDiffSaved = false;
     }
 
-    diffBtn.onclick = function() {
-      if (diffMode) {
-        diffMode = false;
-        diffBtn.textContent = '\u5bf9\u6bd4';
-        diffBtn.style.background = 'transparent';
-        diffBtn.style.color = 'var(--hdc-accent)';
-        hideDiffView();
-      } else {
-        diffMode = true;
-        diffOriginal = _originalContent;
-        diffBtn.textContent = '\u7f16\u8f91';
-        diffBtn.style.background = 'var(--hdc-accent)';
-        diffBtn.style.color = '#000';
-        showDiffView();
-      }
-    };
-
-    function refreshEditorWithDiff() {
+    function refreshEditor() {
       if (_autoSaveTimer) { clearTimeout(_autoSaveTimer); _autoSaveTimer = null; }
       if (currentNoteId) {
         var nid = String(++msgId);
@@ -1027,23 +1562,20 @@
           if (result.error) return;
           var newContent = result.content;
           if (newContent === currentFileContent) return;
-          diffOriginal = _originalContent;
+          
+          // 检测到文件变化，触发 diff 模式（如果不在 diff 模式中）
+          if (!diffMode) {
+            diffOriginal = _originalContent;
+            diffMode = true;
+          }
           currentFileContent = newContent;
           editorTextarea.value = newContent;
           editorFilename.textContent = editorFilename.textContent.replace(' \u25cf', '');
-          if (!isEditMode) {
-            renderPreview(newContent, 'md', '');
-          }
-          if (!diffMode) {
-            diffMode = true;
-            diffBtn.textContent = '\u7f16\u8f91';
-            diffBtn.style.background = 'var(--hdc-accent)';
-            diffBtn.style.color = '#000';
-            showDiffView();
-          } else {
+          
+          // 更新完编辑器内容后再显示 diff
+          if (diffMode) {
             showDiffView();
           }
-          addMsg('\ud83d\udcdd \u7b14\u8bb0\u5df2\u66f4\u65b0', 'sys');
         };
         ws.send(JSON.stringify({ jsonrpc: '2.0', id: nid, method: 'notepad.read', params: { id: currentNoteId } }));
         return;
@@ -1054,28 +1586,24 @@
         if (result.error) return;
         var newContent = result.content;
         if (newContent === currentFileContent) return;
-        diffOriginal = _originalContent;
+        
+        // diff模式下只更新编辑器内容，不重置diff状态
         currentFileContent = newContent;
         editorTextarea.value = newContent;
         editorFilename.textContent = editorFilename.textContent.replace(' \u25cf', '');
-        if (!isEditMode) {
-          var ext = getFileExt(currentFilePath || '');
-          renderPreview(newContent, ext, currentFilePath);
-        }
+
+        // 进入diff模式或刷新已有diff视图
         if (!diffMode) {
+          diffOriginal = _originalContent;
           diffMode = true;
-          diffBtn.textContent = '\u7f16\u8f91';
-          diffBtn.style.background = 'var(--hdc-accent)';
-          diffBtn.style.color = '#000';
-          showDiffView();
-        } else {
+        }
+        if (diffMode) {
           showDiffView();
         }
-        addMsg('\ud83d\udcc4 \u6587\u4ef6\u5df2\u66f4\u65b0\uff1a' + hdcEscape(currentFilePath.split(/[\\/]/).pop()), 'sys');
       };
       ws.send(JSON.stringify({ jsonrpc: '2.0', id: rid, method: 'fs.read_file', params: { path: currentFilePath } }));
     }
-    _refreshEditorFn = refreshEditorWithDiff;
+    _refreshEditorFn = refreshEditor;
 
     var insertBtn = document.createElement('button');
     insertBtn.textContent = '\u2193 \u63d2\u5165\u5230\u5bf9\u8bdd';
@@ -1128,6 +1656,30 @@
       insertBtn.style.display = 'none';
     };
     document.getElementById('hdc-editor-body').appendChild(insertBtn);
+
+    // 点击其他区域时隐藏插入按钮
+    document.addEventListener('mousedown', function(e) {
+      if (insertBtn.contains(e.target)) return;
+      var body = document.getElementById('hdc-editor-body');
+      if (body && body.contains(e.target)) return;
+      insertBtn.style.display = 'none';
+    });
+
+    // 编辑器/预览失焦时隐藏插入按钮
+    editorTextarea.addEventListener('blur', function() {
+      setTimeout(function() {
+        if (!insertBtn.contains(document.activeElement)) {
+          insertBtn.style.display = 'none';
+        }
+      }, 100);
+    });
+    editorPreview.addEventListener('blur', function() {
+      setTimeout(function() {
+        if (!insertBtn.contains(document.activeElement)) {
+          insertBtn.style.display = 'none';
+        }
+      }, 100);
+    });
 
     var lastMouseY = 0;
     editorTextarea.onmouseup = function(e) { lastMouseY = e.offsetY; showInsertBtn(); };
