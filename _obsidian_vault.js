@@ -105,7 +105,6 @@
     }
 
     function activateObsVault() {
-      _obsVaultActive = true;
       wsObsHeader.style.display = 'flex';
       toggleSection(wsObsBody, wsObsArrow);
       wsObsTree.innerHTML = '<div style="padding:20px 8px;text-align:center;color:var(--hdc-fg-dim);font-size:11px">\u52a0\u8f7d\u4e2d...</div>';
@@ -115,6 +114,8 @@
           wsObsTree.innerHTML = '<div style="padding:20px 8px;text-align:center;color:var(--hdc-fg-dim);font-size:11px">\u672a\u914d\u7f6e\u4efb\u4f55 Obsidian \u4ed3\u5e93<br><br>\u70b9\u51fb [\u5207\u6362] \u9009\u6291\u4ed3\u5e93\u8def\u5f84</div>';
           return;
         }
+        // 只有成功获取路径后才设置为激活状态
+        _obsVaultActive = true;
         obsRoot = result.path;
         // 设置全局变量和 localStorage，供自动引用知识库使用
         window._obsidianVaultPath = result.path;
