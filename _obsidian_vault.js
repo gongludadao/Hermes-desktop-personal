@@ -119,6 +119,12 @@
         // 设置全局变量和 localStorage，供自动引用知识库使用
         window._obsidianVaultPath = result.path;
         try { localStorage.setItem('hdc_obsidian_vault', result.path); } catch(e) {}
+        // 自动启用自动引用知识库功能
+        if (typeof _autoKbEnabled !== 'undefined') {
+          _autoKbEnabled = true;
+          var autoKbCheck = document.getElementById('hdc-auto-kb-check');
+          if (autoKbCheck) autoKbCheck.checked = true;
+        }
         loadObsDir(obsRoot, wsObsTree, 0);
       };
       ws.send(JSON.stringify({ jsonrpc: '2.0', id: fid, method: 'obsidian.get_active' }));
