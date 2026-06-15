@@ -347,7 +347,7 @@
               '<div id="hdc-editor-toolbar" style="display:none;padding:4px 8px;border-bottom:1px solid var(--hdc-border);background:var(--hdc-muted);flex-shrink:0;gap:4px;flex-wrap:wrap"></div>' +
               '<div style="flex:1;overflow:hidden;position:relative">' +
                 '<div id="hdc-editor-preview" style="width:100%;height:100%;overflow:auto;padding:12px;font-family:var(--hdc-mono);font-size:13px;line-height:1.6"></div>' +
-                '<textarea id="hdc-editor-textarea" style="display:none;width:100%;height:100%;background:var(--hdc-bg);color:var(--hdc-fg);border:none;padding:12px;font-family:var(--hdc-mono);font-size:13px;line-height:1.6;resize:none;outline:none;tab-size:2"></textarea>' +
+                '<textarea id="hdc-editor-textarea" style="display:none;width:100%;height:100%;background:var(--hdc-bg);color:var(--hdc-fg);border:none;padding:12px;font-family:var(--hdc-mono);font-size:13px;line-height:1.6;resize:none;outline:none;tab-size:2;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word"></textarea>' +
               '</div>' +
         '</div>' +
       '</div>' +
@@ -1802,7 +1802,12 @@
   // ── Helpers ─────────────────────────────────────────────────────────
   function hdcEscape(s) {
     if (!s) return '';
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   // ── 通用右键菜单系统 ───────────────────────────────────────────────

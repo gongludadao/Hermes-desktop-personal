@@ -11,8 +11,291 @@
     var _activeTabId = null;
     var _tabIdCounter = 0;
 
+    // ── 编辑器增强功能 ──
+    // 1. 行号显示
+    var _lineNumbersEl = null;
+    // 2. 查找替换
+    var _searchBox = null;
+    var _searchMatches = [];
+    var _searchCurrentIdx = -1;
+    // 5. 多级撤销栈
+    var _undoStack = [];
+    var _redoStack = [];
+    var _undoMaxSize = 200;
+    var _lastUndoContent = null;
+    var _undoTimer = null;
+
     function _createTabId() {
       return 'tab-' + (++_tabIdCounter);
+    }
+
+    // ── 行号显示 ──
+    function _initLineNumbers() {
+      if (_lineNumbersEl) return;
+      var container = editorTextarea.parentElement;
+      if (!container) return;
+      _lineNumbersEl = document.createElement('div');
+      _lineNumbersEl.id = 'hdc-editor-linenumbers';
+      _lineNumbersEl.style.cssText = 'position:absolute;top:0;left:0;bottom:0;width:44px;overflow:hidden;background:var(--hdc-bg);border-right:1px solid var(--hdc-border);color:var(--hdc-fg-dim);font-family:var(--hdc-mono);font-size:13px;line-height:1.6;text-align:right;padding:12px 6px 12px 0;box-sizing:border-box;user-select:none;z-index:4;pointer-events:none;display:none';
+      container.style.position = 'relative';
+      container.insertBefore(_lineNumbersEl, editorTextarea);
+      editorTextarea.style.paddingLeft = '56px';
+      editorTextarea.addEventListener('scroll', _syncLineNumbersScroll);
+      editorTextarea.addEventListener('input', _updateLineNumbers);
+    }
+
+    function _updateLineNumbers() {
+      if (!_lineNumbersEl || editorTextarea.style.display === 'none') return;
+      var lines = editorTextarea.value.split('\n');
+      var html = '';
+      for (var i = 0; i < lines.length; i++) {
+        html += '<div style="height:1.6em">' + (i + 1) + '</div>';
+      }
+      _lineNumbersEl.innerHTML = html;
+    }
+
+    function _syncLineNumbersScroll() {
+      if (_lineNumbersEl) {
+        _lineNumbersEl.scrollTop = editorTextarea.scrollTop;
+      }
+    }
+
+    function _showLineNumbers(show) {
+      if (!_lineNumbersEl) _initLineNumbers();
+      if (_lineNumbersEl) {
+        _lineNumbersEl.style.display = show ? 'block' : 'none';
+        editorTextarea.style.paddingLeft = show ? '56px' : '12px';
+      }
+    }
+
+    // ── 查找替换 ──
+    function _initSearchBox() {
+      if (_searchBox) return;
+      _searchBox = document.createElement('div');
+      _searchBox.id = 'hdc-editor-searchbox';
+      _searchBox.style.cssText = 'display:none;position:absolute;top:8px;right:8px;background:var(--hdc-card);border:1px solid var(--hdc-border);border-radius:6px;padding:8px;z-index:20;box-shadow:0 4px 12px rgba(0,0,0,0.3);flex-direction:column;gap:6px;min-width:280px';
+      _searchBox.innerHTML =
+        '<div style="display:flex;gap:6px;align-items:center">' +
+          '<input id="hdc-search-input" placeholder="查找..." style="flex:1;background:var(--hdc-bg);border:1px solid var(--hdc-border);border-radius:4px;padding:4px 8px;color:var(--hdc-fg);font-size:12px;outline:none">' +
+          '<span id="hdc-search-count" style="font-size:11px;color:var(--hdc-fg-dim);white-space:nowrap"></span>' +
+        '</div>' +
+        '<div id="hdc-replace-row" style="display:none;gap:6px;align-items:center">' +
+          '<input id="hdc-replace-input" placeholder="替换为..." style="flex:1;background:var(--hdc-bg);border:1px solid var(--hdc-border);border-radius:4px;padding:4px 8px;color:var(--hdc-fg);font-size:12px;outline:none">' +
+        '</div>' +
+        '<div style="display:flex;gap:4px;justify-content:flex-end">' +
+          '<button id="hdc-search-prev" style="background:var(--hdc-muted);border:1px solid var(--hdc-border);color:var(--hdc-fg);border-radius:3px;padding:2px 8px;font-size:11px;cursor:pointer">↑</button>' +
+          '<button id="hdc-search-next" style="background:var(--hdc-muted);border:1px solid var(--hdc-border);color:var(--hdc-fg);border-radius:3px;padding:2px 8px;font-size:11px;cursor:pointer">↓</button>' +
+          '<button id="hdc-search-replace" style="display:none;background:var(--hdc-muted);border:1px solid var(--hdc-border);color:var(--hdc-fg);border-radius:3px;padding:2px 8px;font-size:11px;cursor:pointer">替换</button>' +
+          '<button id="hdc-search-replaceall" style="display:none;background:var(--hdc-muted);border:1px solid var(--hdc-border);color:var(--hdc-fg);border-radius:3px;padding:2px 8px;font-size:11px;cursor:pointer">全部</button>' +
+          '<button id="hdc-search-close" style="background:transparent;border:1px solid var(--hdc-border);color:var(--hdc-fg-dim);border-radius:3px;padding:2px 8px;font-size:11px;cursor:pointer">✕</button>' +
+        '</div>';
+      var body = document.getElementById('hdc-editor-body');
+      if (body) body.appendChild(_searchBox);
+
+      document.getElementById('hdc-search-close').onclick = _hideSearchBox;
+      document.getElementById('hdc-search-prev').onclick = _searchPrev;
+      document.getElementById('hdc-search-next').onclick = _searchNext;
+      document.getElementById('hdc-search-replace').onclick = _searchReplace;
+      document.getElementById('hdc-search-replaceall').onclick = _searchReplaceAll;
+      document.getElementById('hdc-search-input').addEventListener('input', _doSearch);
+      document.getElementById('hdc-search-input').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { e.preventDefault(); _searchNext(); }
+        if (e.key === 'Escape') { _hideSearchBox(); }
+      });
+      document.getElementById('hdc-replace-input').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { e.preventDefault(); _searchReplace(); }
+        if (e.key === 'Escape') { _hideSearchBox(); }
+      });
+    }
+
+    function _showSearchBox(replace) {
+      if (!_searchBox) _initSearchBox();
+      if (!_searchBox) return;
+      _searchBox.style.display = 'flex';
+      var replaceRow = document.getElementById('hdc-replace-row');
+      var replaceBtn = document.getElementById('hdc-search-replace');
+      var replaceAllBtn = document.getElementById('hdc-search-replaceall');
+      if (replace) {
+        replaceRow.style.display = 'flex';
+        replaceBtn.style.display = '';
+        replaceAllBtn.style.display = '';
+        document.getElementById('hdc-replace-input').focus();
+      } else {
+        replaceRow.style.display = 'none';
+        replaceBtn.style.display = 'none';
+        replaceAllBtn.style.display = 'none';
+        document.getElementById('hdc-search-input').focus();
+      }
+      var sel = editorTextarea.value.substring(editorTextarea.selectionStart, editorTextarea.selectionEnd);
+      if (sel) document.getElementById('hdc-search-input').value = sel;
+      _doSearch();
+    }
+
+    function _hideSearchBox() {
+      if (_searchBox) _searchBox.style.display = 'none';
+      _clearSearchHighlights();
+      editorTextarea.focus();
+    }
+
+    function _clearSearchHighlights() {
+      _searchMatches = [];
+      _searchCurrentIdx = -1;
+    }
+
+    function _doSearch() {
+      var query = document.getElementById('hdc-search-input').value;
+      _searchMatches = [];
+      _searchCurrentIdx = -1;
+      if (!query) {
+        document.getElementById('hdc-search-count').textContent = '';
+        return;
+      }
+      var text = editorTextarea.value;
+      var idx = text.indexOf(query);
+      while (idx >= 0) {
+        _searchMatches.push({ start: idx, end: idx + query.length });
+        idx = text.indexOf(query, idx + 1);
+      }
+      document.getElementById('hdc-search-count').textContent = _searchMatches.length + ' 个匹配';
+      if (_searchMatches.length > 0) {
+        _searchCurrentIdx = 0;
+        _scrollToMatch(0);
+      }
+    }
+
+    function _scrollToMatch(idx) {
+      if (idx < 0 || idx >= _searchMatches.length) return;
+      var m = _searchMatches[idx];
+      editorTextarea.setSelectionRange(m.start, m.end);
+      // 计算行号并滚动
+      var lineStart = editorTextarea.value.lastIndexOf('\n', m.start) + 1;
+      var lineNum = editorTextarea.value.substring(0, m.start).split('\n').length - 1;
+      var lineHeight = parseFloat(getComputedStyle(editorTextarea).lineHeight) || 20.8;
+      var scrollTop = lineNum * lineHeight - editorTextarea.clientHeight / 2;
+      editorTextarea.scrollTop = Math.max(0, scrollTop);
+      editorTextarea.focus();
+      _syncLineNumbersScroll();
+    }
+
+    function _searchNext() {
+      if (_searchMatches.length === 0) return;
+      _searchCurrentIdx = (_searchCurrentIdx + 1) % _searchMatches.length;
+      _scrollToMatch(_searchCurrentIdx);
+    }
+
+    function _searchPrev() {
+      if (_searchMatches.length === 0) return;
+      _searchCurrentIdx = (_searchCurrentIdx - 1 + _searchMatches.length) % _searchMatches.length;
+      _scrollToMatch(_searchCurrentIdx);
+    }
+
+    function _searchReplace() {
+      if (_searchCurrentIdx < 0 || _searchCurrentIdx >= _searchMatches.length) return;
+      var replaceText = document.getElementById('hdc-replace-input').value;
+      var m = _searchMatches[_searchCurrentIdx];
+      var val = editorTextarea.value;
+      editorTextarea.value = val.substring(0, m.start) + replaceText + val.substring(m.end);
+      var diff = replaceText.length - (m.end - m.start);
+      for (var i = _searchCurrentIdx + 1; i < _searchMatches.length; i++) {
+        _searchMatches[i].start += diff;
+        _searchMatches[i].end += diff;
+      }
+      _searchMatches.splice(_searchCurrentIdx, 1);
+      if (_searchCurrentIdx >= _searchMatches.length) _searchCurrentIdx = 0;
+      document.getElementById('hdc-search-count').textContent = _searchMatches.length + ' 个匹配';
+      if (_searchMatches.length > 0) _scrollToMatch(_searchCurrentIdx);
+      editorTextarea.dispatchEvent(new Event('input'));
+    }
+
+    function _searchReplaceAll() {
+      var query = document.getElementById('hdc-search-input').value;
+      var replaceText = document.getElementById('hdc-replace-input').value;
+      if (!query) return;
+      editorTextarea.value = editorTextarea.value.split(query).join(replaceText);
+      _doSearch();
+      editorTextarea.dispatchEvent(new Event('input'));
+    }
+
+    // ── 多级撤销栈 ──
+    function _pushUndo() {
+      var content = editorTextarea.value;
+      if (_lastUndoContent === content) return;
+      // 如果栈顶与当前内容相同，不重复入栈
+      if (_undoStack.length > 0 && _undoStack[_undoStack.length - 1] === content) return;
+      _undoStack.push(content);
+      if (_undoStack.length > _undoMaxSize) _undoStack.shift();
+      _redoStack = [];
+      _lastUndoContent = content;
+    }
+
+    function _undo() {
+      if (_undoStack.length <= 1) return;
+      var current = _undoStack.pop();
+      _redoStack.push(current);
+      var prev = _undoStack[_undoStack.length - 1];
+      editorTextarea.value = prev;
+      _lastUndoContent = prev;
+      editorTextarea.dispatchEvent(new Event('input'));
+    }
+
+    function _redo() {
+      if (_redoStack.length === 0) return;
+      var next = _redoStack.pop();
+      _undoStack.push(next);
+      editorTextarea.value = next;
+      _lastUndoContent = next;
+      editorTextarea.dispatchEvent(new Event('input'));
+    }
+
+    function _initUndoStack() {
+      _undoStack = [editorTextarea.value];
+      _redoStack = [];
+      _lastUndoContent = editorTextarea.value;
+    }
+
+    // ── 字符级 diff 辅助函数 ──
+    function _computeCharDiff(oldText, newText) {
+      // 简单的LCS-based字符差异
+      var maxLen = Math.max(oldText.length, newText.length);
+      if (maxLen === 0) return { removed: [], added: [] };
+      // 找公共前缀
+      var prefix = 0;
+      while (prefix < oldText.length && prefix < newText.length && oldText[prefix] === newText[prefix]) prefix++;
+      // 找公共后缀
+      var suffix = 0;
+      while (suffix < oldText.length - prefix && suffix < newText.length - prefix &&
+             oldText[oldText.length - 1 - suffix] === newText[newText.length - 1 - suffix]) suffix++;
+      var removed = [];
+      var added = [];
+      if (prefix + suffix < oldText.length) {
+        removed.push({ start: prefix, end: oldText.length - suffix });
+      }
+      if (prefix + suffix < newText.length) {
+        added.push({ start: prefix, end: newText.length - suffix });
+      }
+      return { removed: removed, added: added };
+    }
+
+    function _renderCharDiff(oldText, newText) {
+      var diff = _computeCharDiff(oldText, newText);
+      var result = { oldHtml: '', newHtml: '' };
+      var last = 0;
+      for (var i = 0; i < diff.removed.length; i++) {
+        var r = diff.removed[i];
+        result.oldHtml += hdcEscape(oldText.substring(last, r.start));
+        result.oldHtml += '<span style="background:rgba(220,80,80,0.35);text-decoration:line-through">' + hdcEscape(oldText.substring(r.start, r.end)) + '</span>';
+        last = r.end;
+      }
+      result.oldHtml += hdcEscape(oldText.substring(last));
+      last = 0;
+      for (var i = 0; i < diff.added.length; i++) {
+        var a = diff.added[i];
+        result.newHtml += hdcEscape(newText.substring(last, a.start));
+        result.newHtml += '<span style="background:rgba(80,200,120,0.35)">' + hdcEscape(newText.substring(a.start, a.end)) + '</span>';
+        last = a.end;
+      }
+      result.newHtml += hdcEscape(newText.substring(last));
+      return result;
     }
 
     function _addTab(opts) {
@@ -32,7 +315,9 @@
         originalContent: opts.content || '',
         scrollTop: 0,
         selectionStart: 0,
-        selectionEnd: 0
+        selectionEnd: 0,
+        diffMode: false,
+        diffOriginal: ''
       };
       _editorTabs.push(tab);
       _renderTabs();
@@ -62,12 +347,21 @@
         if (currentTab) {
           // 保存编辑模式状态
           currentTab.isEditMode = isEditMode;
+          // 保存diff状态
+          currentTab.diffMode = diffMode;
+          currentTab.diffOriginal = diffOriginal;
           // 保存编辑器状态
           if (isEditMode) {
             currentTab.scrollTop = editorTextarea.scrollTop;
             currentTab.selectionStart = editorTextarea.selectionStart;
             currentTab.selectionEnd = editorTextarea.selectionEnd;
             currentTab.content = editorTextarea.value;
+          }
+          // 如果当前在diff模式，先退出diff视图再切换
+          if (diffMode) {
+            hideDiffView();
+            diffMode = false;
+            diffOriginal = '';
           }
         }
       }
@@ -86,6 +380,8 @@
       _originalContent = tab.originalContent;
       _currentDualPanel = tab.dualPanel;
       isEditMode = tab.isEditMode || false;
+      diffMode = tab.diffMode || false;
+      diffOriginal = tab.diffOriginal || '';
 
       editorFilename.textContent = tab.title;
       editorTextarea.value = tab.content;
@@ -109,12 +405,17 @@
         // 显示工具栏
         var toolbar = document.getElementById('hdc-editor-toolbar');
         if (toolbar) toolbar.style.display = 'flex';
+        // 初始化增强功能
+        _showLineNumbers(true);
+        _updateLineNumbers();
+        _initUndoStack();
       } else {
         editorTextarea.style.display = 'none';
         editorPreview.style.display = '';
         // 隐藏工具栏
         var toolbar = document.getElementById('hdc-editor-toolbar');
         if (toolbar) toolbar.style.display = 'none';
+        _showLineNumbers(false);
         if (tab.dualPanel) {
           renderDualPanel(tab.dualPanel);
         } else if (tab.rawHtml !== null) {
@@ -515,13 +816,13 @@
       if (currentNoteId) {
         ws.send(JSON.stringify({ jsonrpc: '2.0', id: String(++msgId), method: 'notepad.update', params: { id: currentNoteId, content: content } }));
         currentFileContent = content;
-        editorFilename.textContent = editorFilename.textContent.replace(' \u25cf', '');
+        editorFilename.textContent = editorFilename.textContent.replace(' ●', '');
         return;
       }
       if (currentFilePath) {
         ws.send(JSON.stringify({ jsonrpc: '2.0', id: String(++msgId), method: 'fs.write_file', params: { path: currentFilePath, content: content } }));
         currentFileContent = content;
-        editorFilename.textContent = editorFilename.textContent.replace(' \u25cf', '');
+        editorFilename.textContent = editorFilename.textContent.replace(' ●', '');
       }
     }
 
@@ -533,13 +834,17 @@
       editorPreview.style.display = 'none';
       editorTextarea.style.display = '';
       editorTextarea.value = currentFileContent;
-      editBtn.textContent = '\u9884\u89c8';
+      editBtn.textContent = '预览';
       editBtn.style.color = 'var(--hdc-accent)';
       editBtn.style.borderColor = 'var(--hdc-accent)';
       document.getElementById('hdc-editor-save').style.display = '';
       // ✅ 显示工具栏
       var toolbar = document.getElementById('hdc-editor-toolbar');
       if (toolbar) toolbar.style.display = 'flex';
+      // ✅ 初始化编辑器增强功能
+      _showLineNumbers(true);
+      _updateLineNumbers();
+      _initUndoStack();
     }
 
     function exitEditMode() {
@@ -549,13 +854,14 @@
       if (tab) tab.isEditMode = false;
       editorTextarea.style.display = 'none';
       editorPreview.style.display = '';
-      editBtn.textContent = '\u7f16\u8f91';
+      editBtn.textContent = '编辑';
       editBtn.style.color = 'var(--hdc-fg-dim)';
       editBtn.style.borderColor = 'var(--hdc-border)';
       document.getElementById('hdc-editor-save').style.display = 'none';
       // ✅ 隐藏工具栏
       var toolbar = document.getElementById('hdc-editor-toolbar');
       if (toolbar) toolbar.style.display = 'none';
+      _showLineNumbers(false);
       var ext = getFileExt(currentFilePath || '');
       renderPreview(currentFileContent, ext || 'md', currentFilePath);
     }
@@ -563,7 +869,7 @@
     function openFile(path, name) {
       var ext = getFileExt(name);
       openPreview({
-        title: name + ' \u52a0\u8f7d\u4e2d...',
+        title: name + ' 加载中...',
         content: '',
         type: ext,
         filePath: path,
@@ -571,31 +877,31 @@
           method: 'fs.read_file',
           params: { path: path },
           onResult: function(result) {
-            if (result.error) return { error: '\u52a0\u8f7d\u5931\u8d25: ' + hdcEscape(result.error.message || '') };
+            if (result.error) return { error: '加载失败: ' + hdcEscape(result.error.message || '') };
             if (result.content_type === 'directory') {
               var items = result.items || [];
-              var md = '# \ud83d\udcc1 ' + hdcEscape(result.name || name) + '\n\n';
+              var md = '# 📁 ' + hdcEscape(result.name || name) + '\n\n';
               var dirs = items.filter(function(i) { return i.is_dir; });
               var files = items.filter(function(i) { return !i.is_dir; });
               if (dirs.length > 0) {
-                md += '**\u6587\u4ef6\u5939**\n';
+                md += '**文件夹**\n';
                 for (var d = 0; d < dirs.length; d++) {
-                  md += '- \ud83d\udcc1 ' + hdcEscape(dirs[d].name) + '\n';
+                  md += '- 📁 ' + hdcEscape(dirs[d].name) + '\n';
                 }
                 md += '\n';
               }
               if (files.length > 0) {
-                md += '**\u6587\u4ef6**\n';
+                md += '**文件**\n';
                 for (var f = 0; f < files.length; f++) {
                   var sizeStr = files[f].size > 1024 ? (files[f].size / 1024).toFixed(1) + ' KB' : files[f].size + ' B';
-                  md += '- \ud83d\udcc4 ' + hdcEscape(files[f].name) + '  (' + sizeStr + ')\n';
+                  md += '- 📄 ' + hdcEscape(files[f].name) + '  (' + sizeStr + ')\n';
                 }
               }
               if (dirs.length === 0 && files.length === 0) {
-                md += '*\u7a7a\u6587\u4ef6\u5939*\n';
+                md += '*空文件夹*\n';
               }
-              md += '\n---\n\u5171 ' + dirs.length + ' \u4e2a\u6587\u4ef6\u5939\uff0c' + files.length + ' \u4e2a\u6587\u4ef6\n';
-              return { title: '\ud83d\udcc1 ' + (result.name || name), content: md, type: 'md' };
+              md += '\n---\n共 ' + dirs.length + ' 个文件夹，' + files.length + ' 个文件\n';
+              return { title: '📁 ' + (result.name || name), content: md, type: 'md' };
             }
             var resultType = result.content_type === 'pdf' ? 'pdf'
               : result.content_type === 'audio' ? 'audio'
@@ -805,15 +1111,52 @@
         var tab = _editorTabs.find(function(t) { return t.id === _activeTabId; });
         if (tab) tab.content = editorTextarea.value;
         currentFileContent = editorTextarea.value;
-        if (editorFilename.textContent.indexOf('\u25cf') < 0) {
-          editorFilename.textContent += ' \u25cf';
+        if (editorFilename.textContent.indexOf('●') < 0) {
+          editorFilename.textContent += ' ●';
+        }
+        // diff模式下禁用自动保存，避免diff基准被破坏
+        if (diffMode) {
+          if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
+          _autoSaveTimer = null;
+          return;
         }
         if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
         _autoSaveTimer = setTimeout(function() {
           _doSave(editorTextarea.value);
         }, 800);
+        // 更新行号
+        _updateLineNumbers();
+        // 延迟入栈撤销
+        if (_undoTimer) clearTimeout(_undoTimer);
+        _undoTimer = setTimeout(function() {
+          _pushUndo();
+        }, 300);
       }
     };
+
+    // 键盘快捷键：查找替换、撤销重做
+    editorTextarea.addEventListener('keydown', function(e) {
+      if (e.ctrlKey && e.key === 'f') {
+        e.preventDefault();
+        _showSearchBox(false);
+      } else if (e.ctrlKey && e.key === 'h') {
+        e.preventDefault();
+        _showSearchBox(true);
+      } else if (e.ctrlKey && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        _undo();
+      } else if ((e.ctrlKey && e.key === 'y') || (e.ctrlKey && e.shiftKey && e.key === 'z')) {
+        e.preventDefault();
+        _redo();
+      } else if (e.key === 'Tab') {
+        e.preventDefault();
+        var start = editorTextarea.selectionStart;
+        var end = editorTextarea.selectionEnd;
+        editorTextarea.value = editorTextarea.value.substring(0, start) + '  ' + editorTextarea.value.substring(end);
+        editorTextarea.setSelectionRange(start + 2, start + 2);
+        editorTextarea.dispatchEvent(new Event('input'));
+      }
+    });
 
     // ✅ Markdown 工具栏
     var _mdToolbar = document.getElementById('hdc-editor-toolbar');
@@ -888,11 +1231,11 @@
     diffActionBar.style.cssText = 'display:none;position:absolute;bottom:0;left:0;right:0;height:44px;z-index:6;border-top:1px solid var(--hdc-border);background:var(--hdc-card);padding:6px 12px;gap:8px;align-items:center;justify-content:flex-end';
 
     var diffAcceptBtn = document.createElement('button');
-    diffAcceptBtn.textContent = '\u2713 \u786e\u8ba4\u66f4\u6539';
+    diffAcceptBtn.textContent = '✓ 确认更改';
     diffAcceptBtn.style.cssText = 'background:var(--hdc-accent);color:' + accentFg + ';border:none;border-radius:4px;padding:5px 14px;font-size:12px;font-weight:600;cursor:pointer';
 
     var diffRevertBtn = document.createElement('button');
-    diffRevertBtn.textContent = '\u21a9 \u64a4\u56de';
+    diffRevertBtn.textContent = '↩ 撤回';
     diffRevertBtn.style.cssText = 'background:transparent;color:var(--hdc-fg-dim);border:1px solid var(--hdc-border);border-radius:4px;padding:5px 14px;font-size:12px;cursor:pointer';
 
     diffActionBar.appendChild(diffRevertBtn);
@@ -1022,8 +1365,7 @@
     var diffBlockIdCounter = 0;
     var confirmedDiffBlocks = {}; // blockId → true  (confirmed, skip on re-render)
 
-    function renderDiff(diffResult, confirmedBlockIds) {
-      confirmedBlockIds = confirmedBlockIds || {};
+    function renderDiff(diffResult) {
       var html = '';
       diffBlockData = {};
       diffBlockStates = {};
@@ -1098,15 +1440,15 @@
           
           html += '<div id="' + blockId + '" class="diff-block" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.1);border-left:3px solid #6ece6e;padding:4px 8px;margin:2px 0;font-size:11px;display:flex;justify-content:space-between;align-items:center">';
           html += '<span style="color:var(--hdc-fg-dim)">';
-          html += '\u2795 \u65b0\u589e: \u884c ' + newStartLine;
+          html += '➕ 新增: 行 ' + newStartLine;
           if (block.adds.length > 1) {
             html += '-' + newEndLine;
           }
-          html += ' (' + block.adds.length + ' \u884c)';
+          html += ' (' + block.adds.length + ' 行)';
           html += '</span>';
           html += '<span class="diff-block-actions" style="display:flex;gap:4px;">';
-          html += '<button class="diff-btn-confirm" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.3);border:none;color:#6ece6e;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">\u2713</button>';
-          html += '<button class="diff-btn-revert" data-block-id="' + blockId + '" style="background:rgba(220,80,80,0.3);border:none;color:#e06060;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">\u2716</button>';
+          html += '<button class="diff-btn-confirm" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.3);border:none;color:#6ece6e;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">✓</button>';
+          html += '<button class="diff-btn-revert" data-block-id="' + blockId + '" style="background:rgba(220,80,80,0.3);border:none;color:#e06060;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">✖</button>';
           html += '</span>';
           html += '</div>';
           
@@ -1134,30 +1476,32 @@
             
             html += '<div id="' + blockId + '" class="diff-block" data-block-id="' + blockId + '" style="background:rgba(255,200,80,0.1);border-left:3px solid #f0a020;padding:4px 8px;margin:2px 0;font-size:11px;display:flex;justify-content:space-between;align-items:center">';
             html += '<span style="color:var(--hdc-fg-dim)">';
-            html += '\ud83d\udcc4 \u4fee\u6539\u5757: \u884c ' + oldStartLine;
+            html += '📄 修改块: 行 ' + oldStartLine;
             if (block.removes.length > 1) {
               html += '-' + oldEndLine;
             }
-            html += ' \u2192 \u884c ' + newStartLine;
+            html += ' → 行 ' + newStartLine;
             if (block.adds.length > 1) {
               html += '-' + newEndLine;
             }
-            html += ' (' + block.removes.length + ' \u884c\u2192' + block.adds.length + ' \u884c)';
+            html += ' (' + block.removes.length + ' 行→' + block.adds.length + ' 行)';
             html += '</span>';
             html += '<span class="diff-block-actions" style="display:flex;gap:4px;">';
-            html += '<button class="diff-btn-confirm" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.3);border:none;color:#6ece6e;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">\u2713</button>';
-            html += '<button class="diff-btn-revert" data-block-id="' + blockId + '" style="background:rgba(220,80,80,0.3);border:none;color:#e06060;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">\u21a9</button>';
+            html += '<button class="diff-btn-confirm" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.3);border:none;color:#6ece6e;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">✓</button>';
+            html += '<button class="diff-btn-revert" data-block-id="' + blockId + '" style="background:rgba(220,80,80,0.3);border:none;color:#e06060;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">↩</button>';
             html += '</span>';
             html += '</div>';
             
             html += '<div class="diff-block-content" data-block-id="' + blockId + '" style="background:rgba(220,80,80,0.08);padding:2px 8px;border-left:3px solid #e06060">';
             for (var k = 0; k < block.removes.length; k++) {
               var d = block.removes[k];
-              var escapedText = hdcEscape(d.text);
+              // 字符级差异高亮
+              var addLine = block.adds[k];
+              var charDiff = addLine ? _renderCharDiff(d.text, addLine.text) : { oldHtml: hdcEscape(d.text) };
               html += '<div style="white-space:pre;display:flex;min-height:20px;align-items:center">';
               html += '<span style="color:var(--hdc-fg-dim);min-width:36px;text-align:right;padding-right:8px;flex-shrink:0;font-size:11px">' + d.oldLine + '</span>';
               html += '<span style="color:#e06060;flex-shrink:0;width:16px">-</span>';
-              html += '<span style="color:#e06060">' + escapedText + '</span>';
+              html += '<span style="color:#e06060">' + charDiff.oldHtml + '</span>';
               html += '</div>';
             }
             html += '</div>';
@@ -1165,11 +1509,12 @@
             html += '<div class="diff-block-content" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.08);padding:2px 8px;border-left:3px solid #6ece6e">';
             for (var k = 0; k < block.adds.length; k++) {
               var d = block.adds[k];
-              var escapedText = hdcEscape(d.text);
+              var removeLine = block.removes[k];
+              var charDiff = removeLine ? _renderCharDiff(removeLine.text, d.text) : { newHtml: hdcEscape(d.text) };
               html += '<div style="white-space:pre;display:flex;min-height:20px;align-items:center">';
               html += '<span style="color:var(--hdc-fg-dim);min-width:36px;text-align:right;padding-right:8px;flex-shrink:0;font-size:11px">' + d.newLine + '</span>';
               html += '<span style="color:#6ece6e;flex-shrink:0;width:16px">+</span>';
-              html += '<span style="color:#6ece6e">' + escapedText + '</span>';
+              html += '<span style="color:#6ece6e">' + charDiff.newHtml + '</span>';
               html += '</div>';
             }
             html += '</div>';
@@ -1179,15 +1524,15 @@
             
             html += '<div id="' + blockId + '" class="diff-block" data-block-id="' + blockId + '" style="background:rgba(220,80,80,0.1);border-left:3px solid #e06060;padding:4px 8px;margin:2px 0;font-size:11px;display:flex;justify-content:space-between;align-items:center">';
             html += '<span style="color:var(--hdc-fg-dim)">';
-            html += '\u2716 \u5220\u9664: \u884c ' + oldStartLine;
+            html += '✖ 删除: 行 ' + oldStartLine;
             if (block.removes.length > 1) {
               html += '-' + oldEndLine;
             }
-            html += ' (' + block.removes.length + ' \u884c)';
+            html += ' (' + block.removes.length + ' 行)';
             html += '</span>';
             html += '<span class="diff-block-actions" style="display:flex;gap:4px;">';
-            html += '<button class="diff-btn-confirm" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.3);border:none;color:#6ece6e;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">\u2713</button>';
-            html += '<button class="diff-btn-revert" data-block-id="' + blockId + '" style="background:rgba(100,150,220,0.3);border:none;color:#6496dc;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">\u21a9</button>';
+            html += '<button class="diff-btn-confirm" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.3);border:none;color:#6ece6e;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">✓</button>';
+            html += '<button class="diff-btn-revert" data-block-id="' + blockId + '" style="background:rgba(100,150,220,0.3);border:none;color:#6496dc;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">↩</button>';
             html += '</span>';
             html += '</div>';
             
@@ -1206,15 +1551,15 @@
             
             html += '<div id="' + blockId + '" class="diff-block" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.1);border-left:3px solid #6ece6e;padding:4px 8px;margin:2px 0;font-size:11px;display:flex;justify-content:space-between;align-items:center">';
             html += '<span style="color:var(--hdc-fg-dim)">';
-            html += '\u2795 \u65b0\u589e: \u884c ' + newStartLine;
+            html += '➕ 新增: 行 ' + newStartLine;
             if (block.adds.length > 1) {
               html += '-' + newEndLine;
             }
-            html += ' (' + block.adds.length + ' \u884c)';
+            html += ' (' + block.adds.length + ' 行)';
             html += '</span>';
             html += '<span class="diff-block-actions" style="display:flex;gap:4px;">';
-            html += '<button class="diff-btn-confirm" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.3);border:none;color:#6ece6e;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">\u2713</button>';
-            html += '<button class="diff-btn-revert" data-block-id="' + blockId + '" style="background:rgba(220,80,80,0.3);border:none;color:#e06060;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">\u2716</button>';
+            html += '<button class="diff-btn-confirm" data-block-id="' + blockId + '" style="background:rgba(80,200,120,0.3);border:none;color:#6ece6e;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">✓</button>';
+            html += '<button class="diff-btn-revert" data-block-id="' + blockId + '" style="background:rgba(220,80,80,0.3);border:none;color:#e06060;padding:2px 8px;border-radius:3px;cursor:pointer;font-size:10px;">✖</button>';
             html += '</span>';
             html += '</div>';
             
@@ -1502,7 +1847,7 @@
       }
 
       var diffResult = computeDiff(diffOriginal, editorTextarea.value);
-      diffOverlay.innerHTML = renderDiff(diffResult, confirmedDiffBlocks);
+      diffOverlay.innerHTML = renderDiff(diffResult);
       diffOverlay.style.display = 'block';
       diffActionBar.style.display = 'flex';
       editorPreview.style.display = 'none';
@@ -1510,6 +1855,8 @@
       // 进入diff时隐藏工具栏，避免与diff视图重叠
       var toolbar = document.getElementById('hdc-editor-toolbar');
       if (toolbar) toolbar.style.display = 'none';
+      // 隐藏行号
+      _showLineNumbers(false);
       bindDiffButtonEvents();
       document.addEventListener('keydown', handleDiffKeydown);
     }
@@ -1531,6 +1878,9 @@
         editBtn.style.color = 'var(--hdc-accent)';
         editBtn.style.borderColor = 'var(--hdc-accent)';
         document.getElementById('hdc-editor-save').style.display = '';
+        // 恢复增强功能
+        _showLineNumbers(true);
+        _updateLineNumbers();
         // 恢复滚动位置
         editorTextarea.scrollTop = _preDiffScrollTop;
       } else {
@@ -1540,10 +1890,7 @@
         editorPreview.style.display = '';
         var toolbar = document.getElementById('hdc-editor-toolbar');
         if (toolbar) toolbar.style.display = 'none';
-        editBtn.textContent = '编辑';
-        editBtn.style.color = 'var(--hdc-fg-dim)';
-        editBtn.style.borderColor = 'var(--hdc-border)';
-        document.getElementById('hdc-editor-save').style.display = 'none';
+        _showLineNumbers(false);
         // 渲染预览并恢复滚动位置
         var ext = getFileExt(currentFilePath || '');
         renderPreview(editorTextarea.value, ext || 'md', currentFilePath);
@@ -1570,7 +1917,7 @@
           }
           currentFileContent = newContent;
           editorTextarea.value = newContent;
-          editorFilename.textContent = editorFilename.textContent.replace(' \u25cf', '');
+          editorFilename.textContent = editorFilename.textContent.replace(' ●', '');
           
           // 更新完编辑器内容后再显示 diff
           if (diffMode) {
@@ -1590,7 +1937,7 @@
         // diff模式下只更新编辑器内容，不重置diff状态
         currentFileContent = newContent;
         editorTextarea.value = newContent;
-        editorFilename.textContent = editorFilename.textContent.replace(' \u25cf', '');
+        editorFilename.textContent = editorFilename.textContent.replace(' ●', '');
 
         // 进入diff模式或刷新已有diff视图
         if (!diffMode) {
@@ -1606,7 +1953,7 @@
     _refreshEditorFn = refreshEditor;
 
     var insertBtn = document.createElement('button');
-    insertBtn.textContent = '\u2193 \u63d2\u5165\u5230\u5bf9\u8bdd';
+    insertBtn.textContent = '↓ 插入到对话';
     insertBtn.style.cssText = 'position:absolute;display:none;background:var(--hdc-accent);color:' + accentFg + ';border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;z-index:10;box-shadow:0 2px 6px rgba(0,0,0,0.3);white-space:nowrap';
     insertBtn.onmousedown = function(e) {
       e.preventDefault();
@@ -1625,7 +1972,7 @@
           var dotIdx = fname.lastIndexOf('.');
           langHint = dotIdx > 0 ? fname.slice(dotIdx + 1) : fname;
         } else if (currentNoteId) {
-          fname = editorFilename.textContent.replace(' \u25cf', '').trim();
+          fname = editorFilename.textContent.replace(' ●', '').trim();
           langHint = 'md';
         } else {
           fname = 'file';
@@ -1637,8 +1984,23 @@
           startLine = editorTextarea.value.substring(0, editorTextarea.selectionStart).split('\n').length;
           endLine = startLine + sel.split('\n').length - 1;
         } else {
-          startLine = 1;
-          endLine = sel.split('\n').length;
+          // 预览模式下根据选区在DOM中的位置计算行号
+          var domSel = window.getSelection();
+          if (domSel && domSel.rangeCount > 0) {
+            var range = domSel.getRangeAt(0);
+            var startNode = range.startContainer;
+            // 向上找到包含行号的元素
+            var lineEl = startNode.parentElement;
+            while (lineEl && lineEl !== editorPreview) {
+              var lineNumMatch = lineEl.textContent.match(/^(\d+)/);
+              if (lineNumMatch) {
+                startLine = parseInt(lineNumMatch[1], 10);
+                break;
+              }
+              lineEl = lineEl.parentElement;
+            }
+            endLine = startLine + sel.split('\n').length - 1;
+          }
         }
         attachments.push({
           type: 'snippet',
@@ -1673,12 +2035,13 @@
         }
       }, 100);
     });
-    editorPreview.addEventListener('blur', function() {
-      setTimeout(function() {
-        if (!insertBtn.contains(document.activeElement)) {
-          insertBtn.style.display = 'none';
-        }
-      }, 100);
+    // 预览面板是div，不会触发blur，用mousedown在预览面板内非选区点击时隐藏
+    editorPreview.addEventListener('mousedown', function(e) {
+      var domSel = window.getSelection();
+      var selText = domSel ? domSel.toString() : '';
+      if (!selText || !selText.trim()) {
+        insertBtn.style.display = 'none';
+      }
     });
 
     var lastMouseY = 0;
