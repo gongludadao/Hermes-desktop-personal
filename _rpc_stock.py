@@ -307,6 +307,27 @@ def _generate_stock_detail_report(code, stock_data):
 
 def register(gw):
     """Register all stock RPC handlers."""
+    # stock.config.load 和 stock.config.save 方法
+    def _stock_config_load(rid, params):
+        try:
+            if _stock_cfg_path.exists():
+                data = json.loads(_stock_cfg_path.read_text(encoding="utf-8"))
+            else:
+                data = {}
+            return gw._ok(rid, data)
+        except Exception as e:
+            return gw._err(rid, 5000, str(e))
+
+    def _stock_config_save(rid, params):
+        try:
+            data = params.get("data", {})
+            _stock_cfg_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            return gw._ok(rid, {"success": True})
+        except Exception as e:
+            return gw._err(rid, 5000, str(e))
+
+    gw._methods["stock.config.load"] = _stock_config_load
+    gw._methods["stock.config.save"] = _stock_config_save
 
     def _stock_query(rid, params):
         codes = (params or {}).get("codes", "")
