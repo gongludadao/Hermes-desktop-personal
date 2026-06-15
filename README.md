@@ -13,10 +13,7 @@ Hermes Agent 桌面界面模块，提供覆盖层和侧边栏功能。
 - **Obsidian仓库** (`_obsidian_vault.js`) - Obsidian笔记集成
 
 ## 启动方式
-
-```bash
-python desktop_ui.py
-```
+文件夹放Hermes根目录下，执行desktop_ui.py
 
 ## 依赖
 

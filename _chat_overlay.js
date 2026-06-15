@@ -338,7 +338,6 @@
               '<div id="hdc-editor-tabs" style="display:flex;align-items:center;gap:2px;padding:4px 8px;overflow-x:auto;flex-shrink:0"></div>' +
               '<div style="padding:6px 12px;display:flex;align-items:center;gap:6px">' +
                 '<span id="hdc-editor-filename" style="font-size:12px;color:var(--hdc-fg);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>' +
-                '<button id="hdc-editor-diff" style="display:none;background:transparent;border:1px solid var(--hdc-accent);color:var(--hdc-accent);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer">\u5bf9\u6bd4</button>' +
                 '<button id="hdc-editor-edit" style="background:transparent;border:1px solid var(--hdc-border);color:var(--hdc-fg-dim);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer">\u7f16\u8f91</button>' +
                 '<button id="hdc-editor-save" style="display:none;background:var(--hdc-accent);color:#000;border:none;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer">\u4fdd\u5b58</button>' +
                 '<button id="hdc-editor-close" style="background:transparent;border:none;color:var(--hdc-fg-dim);cursor:pointer;font-size:14px;padding:0 4px">\u2715</button>' +
@@ -504,7 +503,7 @@
       'editor-edit', 'resizer-editor', 'resizer-sidebar',
       'new-session', 'refresh-sessions', 'toggle-workspace', 'auto-approve',
       'input-dialog', 'input-dialog-title', 'input-dialog-input',
-      'input-dialog-cancel', 'input-dialog-ok', 'editor-diff', 'editor-save', 'editor-close',
+      'input-dialog-cancel', 'input-dialog-ok', 'editor-save', 'editor-close',
       'attachments', 'input-status'
     ];
 
