@@ -156,6 +156,12 @@
           selectObsVault();
         };
       }
-      // 自动激活 Obsidian Vault
-      activateObsVault();
+      // 不在这里自动激活，等 WebSocket 连接后再激活
+    }
+    
+    // WebSocket 连接后自动激活 Obsidian Vault
+    function autoActivateObsVault() {
+      if (!_obsVaultActive && ws && ws.readyState === WebSocket.OPEN) {
+        activateObsVault();
+      }
     }

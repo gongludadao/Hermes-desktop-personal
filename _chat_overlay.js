@@ -1037,9 +1037,11 @@
       if (typeof loadAppConfig === 'function') {
         loadAppConfig(function() {
           if (typeof initStockOnConnect === 'function') initStockOnConnect();
+          if (typeof autoActivateObsVault === 'function') autoActivateObsVault();
         });
       } else {
         if (typeof initStockOnConnect === 'function') initStockOnConnect();
+        if (typeof autoActivateObsVault === 'function') autoActivateObsVault();
       }
     };
 
