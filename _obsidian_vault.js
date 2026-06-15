@@ -116,6 +116,9 @@
           return;
         }
         obsRoot = result.path;
+        // 设置全局变量和 localStorage，供自动引用知识库使用
+        window._obsidianVaultPath = result.path;
+        try { localStorage.setItem('hdc_obsidian_vault', result.path); } catch(e) {}
         loadObsDir(obsRoot, wsObsTree, 0);
       };
       ws.send(JSON.stringify({ jsonrpc: '2.0', id: fid, method: 'obsidian.get_active' }));
