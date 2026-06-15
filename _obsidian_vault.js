@@ -153,4 +153,6 @@
           selectObsVault();
         };
       }
+      // 自动激活 Obsidian Vault
+      activateObsVault();
     }
