@@ -2021,16 +2021,21 @@
     // 自动引用知识库流程
     if (_autoKbEnabled) {
       var keywords = extractKeywords(text);
+      console.log('[AutoKB] 提取关键词:', keywords);
       if (keywords.length > 0 && statusEl) {
         statusEl.textContent = '\u6b63\u5728\u641c\u7d22\u77e5\u8bc6\u5e93...';
       }
+      var vaultPath = getObsidianVaultPath();
+      console.log('[AutoKB] Vault路径:', vaultPath || '(未设置，使用notepad)');
       searchVaultFiles(keywords, function(filePaths) {
+        console.log('[AutoKB] 匹配文件:', filePaths.length, '个');
         if (filePaths.length === 0) {
           _doSendInternal(text, [], []);
           return;
         }
         if (statusEl) statusEl.textContent = '\u6b63\u5728\u8bfb\u53d6 ' + filePaths.length + ' \u4e2a\u7b14\u8bb0...';
         readFilesAndAttach(filePaths, function(results) {
+          console.log('[AutoKB] 读取完成:', results.length, '个文件');
           var extraAttachments = [];
           var quotedNames = [];
           for (var i = 0; i < results.length; i++) {
