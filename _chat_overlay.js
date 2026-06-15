@@ -1033,15 +1033,15 @@
     if (statusEl) statusEl.textContent = '\u6b63\u5728\u8fde\u63a5...';
 
     ws.onopen = function() {
-      if (statusEl) statusEl.textContent = '\u5df2\u8fde\u63a5\uff0c\u7b49\u5f85\u7f51\u5173\u5c31\u7eea...';
+      if (statusEl) statusEl.textContent = '\u5df2\u8fde\u63a5\uff0c\u7b49\u5f99\u7f51\u5173\u5c31\u7eea...';
       if (typeof loadAppConfig === 'function') {
         loadAppConfig(function() {
           if (typeof initStockOnConnect === 'function') initStockOnConnect();
-          if (typeof autoActivateObsVault === 'function') autoActivateObsVault();
+          if (typeof window.autoActivateObsVault === 'function') window.autoActivateObsVault();
         });
       } else {
         if (typeof initStockOnConnect === 'function') initStockOnConnect();
-        if (typeof autoActivateObsVault === 'function') autoActivateObsVault();
+        if (typeof window.autoActivateObsVault === 'function') window.autoActivateObsVault();
       }
     };
 
