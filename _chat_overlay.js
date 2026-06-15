@@ -1865,22 +1865,15 @@
 
   function searchVaultFiles(keywords, onDone) {
     var vaultPath = getObsidianVaultPath();
+    console.log('[AutoKB] searchVaultFiles - vaultPath:', vaultPath);
     if (!vaultPath) {
-      // 尝试 notepad 目录作为 fallback
-      rpcCall('fs.list_dir', { path: 'notepad' }, function(r) {
-        if (r.error || !r.entries) { onDone([]); return; }
-        var files = [];
-        for (var i = 0; i < r.entries.length; i++) {
-          var e = r.entries[i];
-          if (!e.is_dir && /\.md$/i.test(e.name)) {
-            files.push('notepad/' + e.name);
-          }
-        }
-        filterFiles(files, keywords, onDone);
-      });
+      console.log('[AutoKB] vault 路径未设置，无法搜索');
+      onDone([]);
       return;
     }
+    console.log('[AutoKB] 开始递归搜索 vault:', vaultPath);
     listDirRecursive(vaultPath, function(files) {
+      console.log('[AutoKB] 找到 .md 文件:', files.length, '个');
       filterFiles(files, keywords, onDone);
     });
   }
