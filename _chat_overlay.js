@@ -58,8 +58,7 @@
   var _refreshTimer = null;
   var _renderAttachmentsFn = null;
   window._autoKbEnabled = false;  // 暴露为全局变量，供 _obsidian_vault.js 访问
-  var _autoKbStopWords = ['的','了','在','是','我','有','和','就','不','人','都','一','一个','上','也','很','到','说','要','去','你','会','着','没有','看','好','自己','这','那','什么','怎么','为什么','吗','呢','吧','啊','请','帮忙','帮我','帮我看看','帮我写','帮我分析','正在','现在','目前','情况','状态','怎么样','什么情况','什么状态','多少','哪里','谁','哪个','怎样','如何','因为','所以','但是','而且','或者','如果','虽然','不过','只是','可以','可能','应该','需要','想要','希望','觉得','认为','以为','知道','了解','明白','清楚','看到','听到','发现','注意','问题','事情','东西','地方','时候','方法','方式','办法','原因','结果','目的','意义','作用','影响','变化','发展','过程','经历','经验','感受','感觉','想法','意见','观点','态度','行为','活动','行动','操作','步骤','流程','规则','规定','要求','条件','标准','依据','根据','基础','基本','主要','重要','关键','核心','重点','中心','主题','内容','信息','数据','资料','材料','文件','文档','记录','笔记','日记','日志','报告','总结','概述','简介','说明','解释','描述','介绍','展示','显示','表示','表达','陈述','论述','讨论','分析','研究','调查','检查','测试','实验','尝试'];
-  var _autoKbMaxFiles = 3;  // 减少匹配文件数量，避免注入太多不相关内容
+  var _autoKbMaxFiles = 5;  // 最多注入5个匹配文件
   var _autoKbMaxChars = 3000;
 
   // ── Markdown renderer ───────────────────────────────────────────────
@@ -1818,68 +1817,6 @@
 
   // ── 自动引用知识库 ──────────────────────────────────────────────────
   
-  // 关键词扩展映射（同义词/相关词）
-  var _keywordExpansion = {
-    '身体': ['身体', '健康', '体检', '医疗', '保健'],
-    '健康': ['健康', '身体', '体检', '医疗', '保健'],
-    '学习': ['学习', '课程', '培训', '教育', '读书', '技能'],
-    '工作': ['工作', '职业', '就业', '岗位', '职场'],
-    '财务': ['财务', '金钱', '收入', '支出', '账单', '支付宝'],
-    '生活': ['生活', '日常', '起居', '作息'],
-    '游戏': ['游戏', '梦幻', '西游', '攻略'],
-    '梦幻': ['梦幻', '西游', '游戏', '攻略'],
-    '项目': ['项目', '工程', '开发', '代码', '编程'],
-    '代码': ['代码', '编程', '开发', '程序', '脚本'],
-    '小说': ['小说', '故事', '细纲', '大纲', '写作'],
-    '写作': ['写作', '小说', '故事', '创作', '大纲'],
-  };
-  
-  function extractKeywords(text) {
-    var keywords = [];
-    var seen = {};
-    // 中文词（长度>=2）
-    var cnWords = text.match(/[\u4e00-\u9fa5]{2,}/g) || [];
-    for (var i = 0; i < cnWords.length; i++) {
-      var w = cnWords[i];
-      if (_autoKbStopWords.indexOf(w) >= 0) continue;
-      if (!seen[w]) { seen[w] = true; keywords.push(w); }
-      // 关键词扩展
-      if (_keywordExpansion[w]) {
-        for (var ei = 0; ei < _keywordExpansion[w].length; ei++) {
-          var exp = _keywordExpansion[w][ei];
-          if (!seen[exp]) { seen[exp] = true; keywords.push(exp); }
-        }
-      }
-      // 对于较长的中文短语（>=4字），尝试拆分成更短的词
-      if (w.length >= 4) {
-        for (var len = 2; len <= 3 && len < w.length; len++) {
-          for (var start = 0; start <= w.length - len; start++) {
-            var sub = w.substring(start, start + len);
-            if (_autoKbStopWords.indexOf(sub) < 0 && !seen[sub]) {
-              seen[sub] = true;
-              keywords.push(sub);
-              // 子词也进行扩展
-              if (_keywordExpansion[sub]) {
-                for (var ei2 = 0; ei2 < _keywordExpansion[sub].length; ei2++) {
-                  var exp2 = _keywordExpansion[sub][ei2];
-                  if (!seen[exp2]) { seen[exp2] = true; keywords.push(exp2); }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    // 英文词（长度>=3）
-    var enWords = text.match(/[a-zA-Z]{3,}/g) || [];
-    for (var j = 0; j < enWords.length; j++) {
-      var ew = enWords[j].toLowerCase();
-      if (!seen[ew]) { seen[ew] = true; keywords.push(ew); }
-    }
-    console.log('[AutoKB] extractKeywords result:', keywords, 'from text:', text);
-    return keywords;
-  }
-
   function getObsidianVaultPath() {
     // 尝试从全局变量获取
     if (window.__OBSIDIAN_VAULT__ && typeof window.__OBSIDIAN_VAULT__ === 'string') {
@@ -1914,183 +1851,8 @@
     statusEl.style.color = 'var(--hdc-fg-dim)';
   }
 
-  // ── BM25 搜索算法 ─────────────────────────────────────────────────────
-  var BM25_K1 = 1.5;  // 饱和参数
-  var BM25_B = 0.75;  // 文档长度惩罚参数
-
-  // ── 混合搜索参数 ─────────────────────────────────────────────────────
-  var HYBRID_BM25_WEIGHT = 0.5;  // BM25 权重
-  var HYBRID_EMBEDDING_WEIGHT = 0.5;  // 向量搜索权重
+  // ── 语义搜索参数 ─────────────────────────────────────────────────────
   var _embeddingIndexBuilt = false;  // 是否已构建向量索引
-
-  // 计算关键词在文本中的出现次数
-  function countKeywordOccurrences(text, keyword) {
-    var count = 0;
-    var pos = 0;
-    var lowerText = text.toLowerCase();
-    var lowerKw = keyword.toLowerCase();
-    while ((pos = lowerText.indexOf(lowerKw, pos)) >= 0) {
-      count++;
-      pos += lowerKw.length;
-    }
-    return count;
-  }
-
-  // 计算 IDF（逆文档频率）
-  function calculateIDF(keywords, documents) {
-    var idf = {};
-    var totalDocs = documents.length;
-    for (var i = 0; i < keywords.length; i++) {
-      var kw = keywords[i].toLowerCase();
-      var docCount = 0;
-      for (var j = 0; j < documents.length; j++) {
-        if (countKeywordOccurrences(documents[j].content, kw) > 0) {
-          docCount++;
-        }
-      }
-      // IDF = log((N - df + 0.5) / (df + 0.5))
-      // 如果关键词在所有文档中都出现，IDF 会很低
-      // 如果关键词只在少数文档中出现，IDF 会很高
-      idf[kw] = Math.log((totalDocs - docCount + 0.5) / (docCount + 0.5) + 1);
-    }
-    return idf;
-  }
-
-  // 计算单个文档的 BM25 得分
-  function calculateBM25Score(keywords, docContent, docLength, avgDocLength, idf) {
-    var score = 0;
-    for (var i = 0; i < keywords.length; i++) {
-      var kw = keywords[i].toLowerCase();
-      var tf = countKeywordOccurrences(docContent, kw);
-      if (tf === 0) continue;
-      // BM25 公式: IDF × (tf × (k1 + 1)) / (tf + k1 × (1 - b + b × docLength/avgDocLength))
-      var numerator = tf * (BM25_K1 + 1);
-      var denominator = tf + BM25_K1 * (1 - BM25_B + BM25_B * docLength / avgDocLength);
-      score += idf[kw] * numerator / denominator;
-    }
-    return score;
-  }
-
-  // 使用 BM25 搜索文件
-  function searchBM25(keywords, filePaths, onDone) {
-    if (keywords.length === 0 || filePaths.length === 0) { onDone([]); return; }
-    
-    // 核心关键词过滤
-    var coreKeywords = keywords.filter(function(kw) { 
-      return kw.length >= 2 && _autoKbStopWords.indexOf(kw) < 0; 
-    });
-    console.log('[AutoKB] BM25 核心关键词:', coreKeywords);
-    
-    if (coreKeywords.length === 0) { onDone([]); return; }
-
-    // 先进行简单的文件名匹配，筛选候选文件（最多 50 个）
-    var candidates = [];
-    var maxCandidates = 50;
-    for (var i = 0; i < filePaths.length && candidates.length < maxCandidates; i++) {
-      var fp = filePaths[i];
-      var fileName = fp.split(/[\\/]/).pop() || '';
-      var nameLower = fileName.toLowerCase();
-      var dirPath = fp.substring(0, fp.lastIndexOf('/'));
-      var dirLower = dirPath ? dirPath.toLowerCase() : '';
-      // 检查文件名或目录路径是否包含关键词
-      var hasMatch = false;
-      for (var ki = 0; ki < coreKeywords.length; ki++) {
-        var kw = coreKeywords[ki].toLowerCase();
-        if (nameLower.indexOf(kw) >= 0 || dirLower.indexOf(kw) >= 0) {
-          hasMatch = true;
-          break;
-        }
-      }
-      if (hasMatch) {
-        candidates.push(fp);
-      }
-    }
-    
-    // 如果没有候选文件，不进行 BM25 搜索（避免匹配不相关文件）
-    if (candidates.length === 0) {
-      console.log('[AutoKB] BM25 无文件名匹配，跳过搜索');
-      onDone([]);
-      return;
-    } else {
-      console.log('[AutoKB] BM25 候选文件:', candidates.length, '个');
-    }
-
-    // 读取候选文件内容
-    var documents = [];
-    var pending = candidates.length;
-    var totalLength = 0;
-
-    for (var i = 0; i < candidates.length; i++) {
-      (function(fp, idx) {
-        rpcCall('fs.read_file', { path: fp }, function(r) {
-          if (!r.error && r.content) {
-            var content = String(r.content);
-            var fileName = fp.split(/[\\/]/).pop() || '';
-            // 合并文件名和内容，文件名权重更高（重复 3 次）
-            var combinedContent = fileName + ' ' + fileName + ' ' + fileName + ' ' + content;
-            documents.push({
-              path: fp,
-              content: combinedContent,
-              length: combinedContent.length,
-              fileName: fileName
-            });
-            totalLength += combinedContent.length;
-          } else {
-            documents.push({
-              path: fp,
-              content: '',
-              length: 0,
-              fileName: fp.split(/[\\/]/).pop() || ''
-            });
-          }
-          pending--;
-          if (pending === 0) {
-            // 所有文件读取完成，开始 BM25 计算
-            processBM25Results(coreKeywords, documents, totalLength, onDone);
-          }
-        });
-      })(candidates[i], i);
-    }
-  }
-
-  // 处理 BM25 结果
-  function processBM25Results(keywords, documents, totalLength, onDone) {
-    // 过滤掉空文档
-    var validDocs = documents.filter(function(doc) { return doc.length > 0; });
-    if (validDocs.length === 0) { onDone([]); return; }
-    
-    // 只计算有效文档的平均长度
-    var validTotalLength = 0;
-    for (var i = 0; i < validDocs.length; i++) {
-      validTotalLength += validDocs[i].length;
-    }
-    var avgDocLength = validTotalLength / validDocs.length;
-    console.log('[AutoKB] BM25 有效文档:', validDocs.length, '个，平均长度:', avgDocLength);
-    
-    // 计算 IDF（只使用有效文档）
-    var idf = calculateIDF(keywords, validDocs);
-    console.log('[AutoKB] BM25 IDF:', JSON.stringify(idf));
-    
-    // 计算每个文档的 BM25 得分
-    var scored = [];
-    for (var i = 0; i < validDocs.length; i++) {
-      var doc = validDocs[i];
-      var score = calculateBM25Score(keywords, doc.content, doc.length, avgDocLength, idf);
-      if (score > 0) {
-        scored.push({ path: doc.path, score: score, fileName: doc.fileName });
-        console.log('[AutoKB] BM25 得分:', doc.fileName, '→', score.toFixed(2));
-      }
-    }
-    
-    // 按得分排序，返回前 N 个文件
-    scored.sort(function(a, b) { return b.score - a.score; });
-    var result = [];
-    for (var i = 0; i < scored.length && i < _autoKbMaxFiles; i++) {
-      result.push(scored[i].path);
-    }
-    console.log('[AutoKB] BM25 最终匹配:', result.length, '个文件', result);
-    onDone(result);
-  }
 
   // ── 向量搜索（Embedding）──────────────────────────────────────────────
   
@@ -2120,236 +1882,141 @@
       }
     });
     // 立即返回，不等待构建完成
-    // 如果索引还没构建完成，混合搜索会退化成 BM25 搜索
     onDone(false);
   }
   // 暴露为全局函数，供 _obsidian_vault.js 调用
   window.buildEmbeddingIndex = buildEmbeddingIndex;
 
+  // ── 查询预处理（相对时间转换）──────────────────────────────────────────
+  
+  // 将相对时间转换为具体年份/月份
+  function preprocessQuery(query) {
+    var now = new Date();
+    var currentYear = now.getFullYear();
+    var currentMonth = now.getMonth() + 1; // 1-12
+    
+    // 相对时间映射
+    var timeMappings = {
+      '去年': String(currentYear - 1),
+      '今年': String(currentYear),
+      '前年': String(currentYear - 2),
+      '上个月': currentYear + '-' + String(currentMonth - 1 || 12).padStart(2, '0'),
+      '这个月': currentYear + '-' + String(currentMonth).padStart(2, '0'),
+      '去年这个时候': String(currentYear - 1),
+      '去年年底': String(currentYear - 1) + '-12',
+      '去年年初': String(currentYear - 1) + '-01',
+      '今年年初': String(currentYear) + '-01',
+      '今年年底': String(currentYear) + '-12',
+    };
+    
+    // 替换相对时间
+    var processedQuery = query;
+    for (var timeWord in timeMappings) {
+      if (query.indexOf(timeWord) >= 0) {
+        processedQuery = processedQuery.replace(timeWord, timeMappings[timeWord] + ' ' + timeWord);
+        console.log('[AutoKB] 查询预处理: "' + timeWord + '" → "' + timeMappings[timeWord] + '"');
+      }
+    }
+    
+    return processedQuery;
+  }
+
   // 使用向量索引搜索
   function searchEmbeddingIndex(query, onDone) {
+    // 查询预处理：将相对时间转换为具体年份
+    var processedQuery = preprocessQuery(query);
     console.log('[AutoKB] Embedding: 开始向量搜索...');
-    rpcCall('embedding.query_index', { query: query, top_k: _autoKbMaxFiles }, function(r) {
+    console.log('[AutoKB] Embedding: 原始查询:', query);
+    console.log('[AutoKB] Embedding: 处理后:', processedQuery);
+    
+    rpcCall('embedding.query_index', { query: processedQuery, top_k: _autoKbMaxFiles }, function(r) {
       if (r.error) {
         console.log('[AutoKB] Embedding: 向量搜索失败', r.error.message);
+        // 检查是否是模型加载中的错误
+        if (r.error.message && r.error.message.indexOf('model loading') >= 0) {
+          if (statusEl) {
+            statusEl.textContent = '[AutoKB] 模型正在加载中，请稍候再试...';
+            statusEl.style.color = 'var(--hdc-accent)';
+          }
+        }
         onDone([]);
       } else {
         var results = r.results || [];
         console.log('[AutoKB] Embedding: 向量搜索结果', results.length, '个');
-        var paths = [];
         for (var i = 0; i < results.length; i++) {
-          paths.push(results[i].path);
-          console.log('[AutoKB] Embedding: ', results[i].fileName, '相似度:', results[i].similarity.toFixed(3));
+          var chunkInfo = results[i].chunkTotal > 1 ? 
+            ' [chunk ' + (results[i].chunkIdx + 1) + '/' + results[i].chunkTotal + ']' : '';
+          console.log('[AutoKB] Embedding: ', results[i].fileName, chunkInfo, '相似度:', results[i].similarity.toFixed(3));
         }
-        onDone(paths, results);
+        onDone(results);
       }
     });
   }
 
-  // ── 混合搜索（BM25 + Embedding）──────────────────────────────────────────
+  // ── 语义搜索（Embedding）──────────────────────────────────────────
   
-  // 混合搜索：结合 BM25 和向量搜索
-  function searchHybrid(keywords, filePaths, onDone) {
-    console.log('[AutoKB] Hybrid: 开始混合搜索...');
+  // 语义搜索：只使用向量搜索，返回匹配的 chunk 片段
+  function searchSemantic(filePaths, originalQuery, onDone) {
+    console.log('[AutoKB] Semantic: 开始语义搜索...');
+    console.log('[AutoKB] Semantic: 原始查询:', originalQuery);
     
-    // 如果向量索引不可用，不进行搜索（避免匹配不相关文件）
+    // 如果向量索引不可用，不进行搜索
     if (!_embeddingIndexBuilt) {
-      console.log('[AutoKB] Hybrid: 向量索引未构建，跳过搜索');
-      console.log('[AutoKB] Hybrid: 请等待向量索引构建完成后再发送消息');
+      console.log('[AutoKB] Semantic: 向量索引未构建，跳过搜索');
+      console.log('[AutoKB] Semantic: 请等待向量索引构建完成后再发送消息');
       onDone([]);
       return;
     }
     
-    // 核心关键词过滤
-    var coreKeywords = keywords.filter(function(kw) { 
-      return kw.length >= 2 && _autoKbStopWords.indexOf(kw) < 0; 
+    // 向量搜索（使用原始查询，语义搜索需要完整句子）
+    searchEmbeddingIndex(originalQuery, function(results) {
+      if (!results || results.length === 0) {
+        console.log('[AutoKB] Semantic: 无匹配结果');
+        onDone([]);
+        return;
+      }
+      
+      // 过滤低相似度结果（使用相对阈值）
+      var MIN_SIMILARITY = 0.55;  // 最低绝对相似度阈值（提高，避免短查询误触发）
+      var RELATIVE_THRESHOLD = 0.10;  // 与最高分的最小差距（相对阈值）
+      
+      // 找出最高相似度
+      var maxSimilarity = 0;
+      for (var i = 0; i < results.length; i++) {
+        if (results[i].similarity > maxSimilarity) {
+          maxSimilarity = results[i].similarity;
+        }
+      }
+      
+      // 返回匹配的 chunk 片段（包含内容，不再需要读取整个文件）
+      var matchedChunks = [];
+      for (var i = 0; i < results.length && i < _autoKbMaxFiles; i++) {
+        var sim = results[i].similarity;
+        var diff = maxSimilarity - sim;
+        
+        // 必须同时满足：绝对阈值 + 与最高分差距不超过阈值
+        if (sim >= MIN_SIMILARITY && diff <= RELATIVE_THRESHOLD) {
+          var chunkInfo = results[i].chunkTotal > 1 ? 
+            ' [片段 ' + (results[i].chunkIdx + 1) + '/' + results[i].chunkTotal + ']' : '';
+          console.log('[AutoKB] Semantic: ', results[i].fileName, chunkInfo, '相似度:', sim.toFixed(3), '差距:', diff.toFixed(3));
+          matchedChunks.push({
+            path: results[i].path,
+            fileName: results[i].fileName,
+            content: results[i].chunkText || '',
+            chunkIdx: results[i].chunkIdx || 0,
+            chunkTotal: results[i].chunkTotal || 1,
+            charStart: results[i].charStart || 0,
+            charEnd: results[i].charEnd || 0,
+            similarity: sim
+          });
+        } else {
+          console.log('[AutoKB] Semantic: 跳过', results[i].fileName, '相似度:', sim.toFixed(3), '差距:', diff.toFixed(3));
+        }
+      }
+      
+      console.log('[AutoKB] Semantic: 最终匹配', matchedChunks.length, '个片段（最高分:', maxSimilarity.toFixed(3), '，相对阈值:', RELATIVE_THRESHOLD, '）');
+      onDone(matchedChunks);
     });
-    
-    if (coreKeywords.length === 0) { onDone([]); return; }
-    
-    // 构建查询文本（合并关键词）
-    var queryText = coreKeywords.join(' ');
-    console.log('[AutoKB] Hybrid: 查询文本:', queryText);
-    
-    // 同时进行 BM25 搜索和向量搜索
-    var bm25Results = null;
-    var embeddingResults = null;
-    var pending = 2;
-    
-    function checkHybridDone() {
-      pending--;
-      if (pending > 0) return;
-      
-      // 合并两种搜索结果
-      var merged = {};
-      
-      // 添加 BM25 结果
-      if (bm25Results && bm25Results.length > 0) {
-        for (var i = 0; i < bm25Results.length; i++) {
-          var path = bm25Results[i].path;
-          var score = bm25Results[i].score;
-          if (!merged[path]) merged[path] = { path: path, bm25Score: 0, embeddingScore: 0, fileName: bm25Results[i].fileName };
-          merged[path].bm25Score = score;
-        }
-      }
-      
-      // 添加向量搜索结果
-      if (embeddingResults && embeddingResults.length > 0) {
-        for (var j = 0; j < embeddingResults.length; j++) {
-          var ePath = embeddingResults[j].path;
-          var eScore = embeddingResults[j].similarity;
-          if (!merged[ePath]) merged[ePath] = { path: ePath, bm25Score: 0, embeddingScore: 0, fileName: embeddingResults[j].fileName };
-          merged[ePath].embeddingScore = eScore;
-        }
-      }
-      
-      // 计算混合得分
-      var scoredList = [];
-      for (var p in merged) {
-        var item = merged[p];
-        // BM25 得分归一化（假设最大得分为 10）
-        var bm25Normalized = Math.min(item.bm25Score / 10, 1);
-        // 向量得分已经在 0-1 范围内
-        var embeddingNormalized = item.embeddingScore;
-        // 混合得分
-        var hybridScore = bm25Normalized * HYBRID_BM25_WEIGHT + embeddingNormalized * HYBRID_EMBEDDING_WEIGHT;
-        scoredList.push({
-          path: item.path,
-          score: hybridScore,
-          fileName: item.fileName,
-          bm25Score: item.bm25Score,
-          embeddingScore: item.embeddingScore
-        });
-        console.log('[AutoKB] Hybrid: ', item.fileName, 'BM25:', item.bm25Score.toFixed(2), 'Embedding:', item.embeddingScore.toFixed(3), '混合:', hybridScore.toFixed(3));
-      }
-      
-      // 按混合得分排序
-      scoredList.sort(function(a, b) { return b.score - a.score; });
-      
-      // 返回前 N 个文件
-      var result = [];
-      for (var k = 0; k < scoredList.length && k < _autoKbMaxFiles; k++) {
-        result.push(scoredList[k].path);
-      }
-      
-      console.log('[AutoKB] Hybrid: 最终匹配', result.length, '个文件', result);
-      onDone(result);
-    }
-    
-    // BM25 搜索
-    searchBM25Internal(coreKeywords, filePaths, function(paths, scored) {
-      bm25Results = scored || [];
-      checkHybridDone();
-    });
-    
-    // 向量搜索（如果索引已构建）
-    if (_embeddingIndexBuilt) {
-      searchEmbeddingIndex(queryText, function(paths, results) {
-        embeddingResults = results || [];
-        checkHybridDone();
-      });
-    } else {
-      // 索引未构建，跳过向量搜索，只使用 BM25
-      embeddingResults = [];
-      checkHybridDone();
-    }
-  }
-
-  // BM25 搜索内部函数（返回得分详情）
-  function searchBM25Internal(keywords, filePaths, onDone) {
-    if (keywords.length === 0 || filePaths.length === 0) { onDone([], []); return; }
-    
-    // 先进行简单的文件名匹配，筛选候选文件（最多 50 个）
-    var candidates = [];
-    var maxCandidates = 50;
-    for (var i = 0; i < filePaths.length && candidates.length < maxCandidates; i++) {
-      var fp = filePaths[i];
-      var fileName = fp.split(/[\\/]/).pop() || '';
-      var nameLower = fileName.toLowerCase();
-      var dirPath = fp.substring(0, fp.lastIndexOf('/'));
-      var dirLower = dirPath ? dirPath.toLowerCase() : '';
-      var hasMatch = false;
-      for (var ki = 0; ki < keywords.length; ki++) {
-        var kw = keywords[ki].toLowerCase();
-        if (nameLower.indexOf(kw) >= 0 || dirLower.indexOf(kw) >= 0) {
-          hasMatch = true;
-          break;
-        }
-      }
-      if (hasMatch) candidates.push(fp);
-    }
-    
-    if (candidates.length === 0) {
-      candidates = filePaths.slice(0, 20);
-      console.log('[AutoKB] BM25: 无文件名匹配，取前 20 个文件');
-    } else {
-      console.log('[AutoKB] BM25: 候选文件', candidates.length, '个');
-    }
-
-    var documents = [];
-    var pending = candidates.length;
-    var totalLength = 0;
-
-    for (var i = 0; i < candidates.length; i++) {
-      (function(fp, idx) {
-        rpcCall('fs.read_file', { path: fp }, function(r) {
-          if (!r.error && r.content) {
-            var content = String(r.content);
-            var fileName = fp.split(/[\\/]/).pop() || '';
-            var combinedContent = fileName + ' ' + fileName + ' ' + fileName + ' ' + content;
-            documents.push({
-              path: fp,
-              content: combinedContent,
-              length: combinedContent.length,
-              fileName: fileName
-            });
-            totalLength += combinedContent.length;
-          } else {
-            documents.push({
-              path: fp,
-              content: '',
-              length: 0,
-              fileName: fp.split(/[\\/]/).pop() || ''
-            });
-          }
-          pending--;
-          if (pending === 0) {
-            processBM25InternalResults(keywords, documents, totalLength, onDone);
-          }
-        });
-      })(candidates[i], i);
-    }
-  }
-
-  // 处理 BM25 内部结果（返回得分详情）
-  function processBM25InternalResults(keywords, documents, totalLength, onDone) {
-    var validDocs = documents.filter(function(doc) { return doc.length > 0; });
-    if (validDocs.length === 0) { onDone([], []); return; }
-    
-    var validTotalLength = 0;
-    for (var i = 0; i < validDocs.length; i++) {
-      validTotalLength += validDocs[i].length;
-    }
-    var avgDocLength = validTotalLength / validDocs.length;
-    
-    var idf = calculateIDF(keywords, validDocs);
-    
-    var scored = [];
-    for (var i = 0; i < validDocs.length; i++) {
-      var doc = validDocs[i];
-      var score = calculateBM25Score(keywords, doc.content, doc.length, avgDocLength, idf);
-      if (score > 0) {
-        scored.push({ path: doc.path, score: score, fileName: doc.fileName });
-      }
-    }
-    
-    scored.sort(function(a, b) { return b.score - a.score; });
-    var result = [];
-    for (var i = 0; i < scored.length && i < _autoKbMaxFiles; i++) {
-      result.push(scored[i].path);
-    }
-    
-    onDone(result, scored);
   }
 
   function rpcCall(method, params, callback) {
@@ -2403,7 +2070,7 @@
     checkDone();
   }
 
-  function searchVaultFiles(keywords, onDone) {
+  function searchVaultFiles(originalQuery, onDone) {
     var vaultPath = getObsidianVaultPath();
     console.log('[AutoKB] searchVaultFiles - vaultPath:', vaultPath);
     if (!vaultPath) {
@@ -2414,95 +2081,9 @@
     console.log('[AutoKB] 开始递归搜索 vault:', vaultPath);
     listDirRecursive(vaultPath, function(files) {
       console.log('[AutoKB] 找到 .md 文件:', files.length, '个');
-      // 使用混合搜索（BM25 + Embedding）
-      searchHybrid(keywords, files, onDone);
+      // 使用语义搜索（向量搜索）
+      searchSemantic(files, originalQuery, onDone);
     });
-  }
-
-  function filterFiles(filePaths, keywords, onDone) {
-    if (keywords.length === 0 || filePaths.length === 0) { onDone([]); return; }
-    var scored = [];
-    var pending = filePaths.length;
-    var maxContentChecks = 10; // 减少内容检查数量，提高精准度
-    var contentCheckCount = 0;
-    // 只保留核心关键词（长度>=2，不是泛化词）
-    var coreKeywords = keywords.filter(function(kw) { return kw.length >= 2 && _autoKbStopWords.indexOf(kw) < 0; });
-    console.log('[AutoKB] 核心关键词:', coreKeywords);
-    function checkDone() {
-      pending--;
-      if (pending > 0) return;
-      scored.sort(function(a, b) { return b.score - a.score; });
-      var result = [];
-      // 只返回得分>=5的文件（必须有文件名匹配，或目录路径匹配+内容匹配）
-      for (var i = 0; i < scored.length && i < _autoKbMaxFiles; i++) {
-        if (scored[i].score >= 5) result.push(scored[i].path);
-      }
-      console.log('[AutoKB] 最终匹配文件:', result.length, '个', result);
-      onDone(result);
-    }
-    for (var fi = 0; fi < filePaths.length; fi++) {
-      (function(fp) {
-        var fileName = fp.split(/[\\/]/).pop() || '';
-        var nameLower = fileName.toLowerCase();
-        var dirPath = fp.substring(0, fp.lastIndexOf('/'));
-        var dirLower = dirPath ? dirPath.toLowerCase() : '';
-        var score = 0;
-        var matchedKw = [];
-        var matchDetails = [];
-        // 文件名匹配（权重最高）
-        for (var ki = 0; ki < coreKeywords.length; ki++) {
-          var kw = coreKeywords[ki].toLowerCase();
-          if (nameLower.indexOf(kw) >= 0) {
-            score += 10;
-            matchedKw.push(kw);
-            matchDetails.push('文件名:' + kw);
-          }
-        }
-        // 目录路径匹配（中等权重）
-        if (dirPath) {
-          for (var di = 0; di < coreKeywords.length; di++) {
-            var kwDir = coreKeywords[di].toLowerCase();
-            if (dirLower.indexOf(kwDir) >= 0 && matchedKw.indexOf(kwDir) < 0) {
-              score += 3;
-              matchedKw.push(kwDir);
-              matchDetails.push('目录:' + kwDir);
-            }
-          }
-        }
-        // 记录匹配详情
-        if (score > 0) {
-          console.log('[AutoKB] 文件匹配:', fp, '得分:', score, '匹配:', matchDetails.join(','));
-        }
-        // 只有当文件名或目录路径有匹配时，才进行内容检查
-        if (score >= 3 && contentCheckCount < maxContentChecks && coreKeywords.length > matchedKw.length) {
-          contentCheckCount++;
-          rpcCall('fs.read_file', { path: fp }, function(r) {
-            if (!r.error && r.content) {
-              var contentPreview = String(r.content).substring(0, 5000);
-              var contentLower = contentPreview.toLowerCase();
-              for (var kj = 0; kj < coreKeywords.length; kj++) {
-                var kw2 = coreKeywords[kj].toLowerCase();
-                if (matchedKw.indexOf(kw2) >= 0) continue; // 已经匹配过了
-                // 计算关键词出现次数
-                var count = 0;
-                var pos = 0;
-                while ((pos = contentLower.indexOf(kw2, pos)) >= 0) {
-                  count++;
-                  pos += kw2.length;
-                }
-                // 只有出现次数>=3才给予权重
-                if (count >= 3) score += count;
-              }
-            }
-            if (score > 0) scored.push({ path: fp, score: score });
-            checkDone();
-          });
-        } else {
-          if (score > 0) scored.push({ path: fp, score: score });
-          checkDone();
-        }
-      })(filePaths[fi]);
-    }
   }
 
   function readFilesAndAttach(filePaths, onDone) {
@@ -2594,25 +2175,17 @@
     pendingBotMsgs = [];
     if (pendingBotTimer) { clearTimeout(pendingBotTimer); pendingBotTimer = null; }
 
-    // 自动引用知识库流程
+    // 自动引用知识库流程（语义搜索）
     console.log('[AutoKB] doSend called, window._autoKbEnabled:', window._autoKbEnabled);
     if (window._autoKbEnabled) {
-      if (statusEl) {
-        statusEl.textContent = '[AutoKB] 正在提取关键词...';
-        statusEl.style.color = 'var(--hdc-accent)';
-      }
-      var keywords = extractKeywords(text);
-      console.log('[AutoKB] 提取关键词:', keywords);
-      if (keywords.length === 0) {
-        if (statusEl) {
-          statusEl.textContent = '[AutoKB] 未提取到关键词，直接发送';
-          statusEl.style.color = 'var(--hdc-fg-dim)';
-        }
+      // 短查询保护：少于 8 个字符的查询不触发语义搜索（避免"知道了""好的"等误触发）
+      if (text.length < 8) {
+        console.log('[AutoKB] 查询过短（' + text.length + ' 字符），跳过语义搜索');
         _doSendInternal(text, [], []);
         return;
       }
       if (statusEl) {
-        statusEl.textContent = '[AutoKB] 关键词: ' + keywords.join(', ') + '，正在搜索...';
+        statusEl.textContent = '[AutoKB] 正在语义搜索...';
         statusEl.style.color = 'var(--hdc-accent)';
       }
       var vaultPath = getObsidianVaultPath();
@@ -2626,35 +2199,37 @@
         _doSendInternal(text, [], []);
         return;
       }
-      searchVaultFiles(keywords, function(filePaths) {
-        console.log('[AutoKB] 匹配文件:', filePaths.length, '个', filePaths);
+      searchVaultFiles(text, function(matchedChunks) {
+        console.log('[AutoKB] 匹配片段:', matchedChunks.length, '个');
         if (statusEl) {
-          statusEl.textContent = '[AutoKB] 找到 ' + filePaths.length + ' 个匹配文件';
-          statusEl.style.color = filePaths.length > 0 ? 'var(--hdc-accent)' : 'var(--hdc-fg-dim)';
+          statusEl.textContent = '[AutoKB] 找到 ' + matchedChunks.length + ' 个匹配片段';
+          statusEl.style.color = matchedChunks.length > 0 ? 'var(--hdc-accent)' : 'var(--hdc-fg-dim)';
         }
-        if (filePaths.length === 0) {
+        if (matchedChunks.length === 0) {
           _doSendInternal(text, [], []);
           return;
         }
-        if (statusEl) statusEl.textContent = '\u6b63\u5728\u8bfb\u53d6 ' + filePaths.length + ' \u4e2a\u7b14\u8bb0...';
-        readFilesAndAttach(filePaths, function(results) {
-          console.log('[AutoKB] 读取完成:', results.length, '个文件');
-          var extraAttachments = [];
-          var quotedNames = [];
-          for (var i = 0; i < results.length; i++) {
-            var r = results[i];
-            var name = r.path.split(/[\\/]/).pop() || r.path;
-            extraAttachments.push({
-              type: 'file',
-              filePath: r.path,
-              fileName: name,
-              lang: 'markdown',
-              content: r.content
-            });
-            quotedNames.push(name.replace(/\.md$/i, ''));
-          }
-          _doSendInternal(text, extraAttachments, quotedNames);
-        });
+        // 直接用 chunk 内容构造 snippet 附件，不再读取整个文件
+        var extraAttachments = [];
+        var quotedNames = [];
+        for (var i = 0; i < matchedChunks.length; i++) {
+          var chunk = matchedChunks[i];
+          var name = chunk.fileName || (chunk.path.split(/[\\/]/).pop() || chunk.path);
+          var chunkLabel = chunk.chunkTotal > 1 ? 
+            ' [片段 ' + (chunk.chunkIdx + 1) + '/' + chunk.chunkTotal + ']' : '';
+          extraAttachments.push({
+            type: 'snippet',
+            fileName: name + chunkLabel,
+            filePath: chunk.path,
+            content: chunk.content,
+            lang: 'markdown',
+            startLine: chunk.charStart,
+            endLine: chunk.charEnd
+          });
+          quotedNames.push(name.replace(/\.md$/i, ''));
+        }
+        if (statusEl) statusEl.textContent = '已注入 ' + extraAttachments.length + ' 个相关片段';
+        _doSendInternal(text, extraAttachments, quotedNames);
       });
       return;
     }

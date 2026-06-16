@@ -3,6 +3,12 @@
     var obsTreeContainers = {};
     var obsRoot = null;
     var obsOpen = true;
+    
+    // Obsidian Vault 专用右键菜单
+    var obsContextMenu = null;
+    var _embeddingApiKey = '';
+    var _embeddingBaseUrl = '';
+    var _embeddingModel = 'text-embedding-3-small';
 
     function renderObsFileItems(items, container, parentPath, depth) {
       depth = depth || 0;
@@ -225,3 +231,5 @@
     window.autoActivateObsVault = autoActivateObsVault;
     window.startVaultPathMonitor = startVaultPathMonitor;
     console.log('[ObsVault] autoActivateObsVault exported to window');
+    
+    // 导出到全局
