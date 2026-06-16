@@ -1288,7 +1288,11 @@
             if (pendingBotTimer) { clearTimeout(pendingBotTimer); pendingBotTimer = null; }
             addMsg(p.message || '\u672a\u77e5\u9519\u8bef', 'err');
             setSending(false);
-            if (statusEl) { statusEl.textContent = '\u5c31\u7eea'; statusEl.style.color = 'var(--hdc-fg-dim)'; }
+            if (statusEl) {
+              var kbStatus = _autoKbEnabled ? ('[AutoKB] vault: ' + (getObsidianVaultPath() || '未设置')) : '';
+              statusEl.textContent = '\u5c31\u7eea' + (kbStatus ? ' | ' + kbStatus : '');
+              statusEl.style.color = 'var(--hdc-fg-dim)';
+            }
             break;
 
           case 'approval.request':
@@ -1749,7 +1753,11 @@
     }
     setSending(false);
     if (inpEl) inpEl.focus();
-    if (statusEl) { statusEl.textContent = '\u5c31\u7eea'; statusEl.style.color = 'var(--hdc-fg-dim)'; }
+    if (statusEl) {
+      var kbStatus = _autoKbEnabled ? ('[AutoKB] vault: ' + (getObsidianVaultPath() || '未设置')) : '';
+      statusEl.textContent = '\u5c31\u7eea' + (kbStatus ? ' | ' + kbStatus : '');
+      statusEl.style.color = 'var(--hdc-fg-dim)';
+    }
   }
 
   var _titleFlashTimer = null;
