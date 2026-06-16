@@ -722,7 +722,17 @@
     var autoKbCheck = ui['auto-kb-check'];
     if (autoKbCheck) {
       autoKbCheck.checked = _autoKbEnabled;
-      autoKbCheck.onchange = function() { _autoKbEnabled = autoKbCheck.checked; };
+      autoKbCheck.onchange = function() {
+        _autoKbEnabled = autoKbCheck.checked;
+        if (statusEl) {
+          statusEl.textContent = '[AutoKB] ' + (_autoKbEnabled ? '已启用' : '已禁用') + ', vault: ' + (getObsidianVaultPath() || '未设置');
+          statusEl.style.color = _autoKbEnabled ? 'var(--hdc-accent)' : 'var(--hdc-fg-dim)';
+        }
+      };
+      // 初始化时显示状态
+      if (statusEl) {
+        statusEl.textContent = '[AutoKB] ' + (_autoKbEnabled ? '已启用' : '已禁用') + ', vault: ' + (getObsidianVaultPath() || '未设置');
+      }
     }
     if (autoKbBar) autoKbBar.style.display = 'flex';
     sessionPicker.onchange = onSessionChange;
