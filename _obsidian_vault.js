@@ -108,13 +108,13 @@
       console.log('[ObsVault] activateObsVault called');
       wsObsHeader.style.display = 'flex';
       toggleSection(wsObsBody, wsObsArrow);
-      wsObsTree.innerHTML = '<div style="padding:20px 8px;text-align:center;color:var(--hdc-fg-dim);font-size:11px">\u52a0\u8f7d\u4e2d...</div>';
+      wsObsTree.innerHTML = '<div style="padding:20px 8px;text-align:center;color:var(--hdc-fg-dim);font-size:11px">[ObsVault] 正在获取 vault 路径...</div>';
       var fid = String(++msgId);
       _rpcCallbacks[fid] = function(result) {
         console.log('[ObsVault] obsidian.get_active result:', result);
         if (result.error || !result.path) {
           console.log('[ObsVault] no vault path found');
-          wsObsTree.innerHTML = '<div style="padding:20px 8px;text-align:center;color:var(--hdc-fg-dim);font-size:11px">\u672a\u914d\u7f6e\u4efb\u4f55 Obsidian \u4ed3\u5e93<br><br>\u70b9\u51fb [\u5207\u6362] \u9009\u6291\u4ed3\u5e93\u8def\u5f84</div>';
+          wsObsTree.innerHTML = '<div style="padding:20px 8px;text-align:center;color:var(--hdc-fg-dim);font-size:11px">[ObsVault] 未配置任何 Obsidian 仓库<br><br>点击 [切换] 选择仓库路径</div>';
           return;
         }
         // 只有成功获取路径后才设置为激活状态
@@ -130,6 +130,11 @@
           console.log('[ObsVault] _autoKbEnabled set to true');
           var autoKbCheck = document.getElementById('hdc-auto-kb-check');
           if (autoKbCheck) autoKbCheck.checked = true;
+          // 在状态栏显示成功信息
+          if (statusEl) {
+            statusEl.textContent = '[ObsVault] 已激活: ' + result.path;
+            statusEl.style.color = 'var(--hdc-accent)';
+          }
         }
         loadObsDir(obsRoot, wsObsTree, 0);
       };

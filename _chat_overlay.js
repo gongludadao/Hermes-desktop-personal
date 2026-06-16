@@ -2024,6 +2024,7 @@
     if (pendingBotTimer) { clearTimeout(pendingBotTimer); pendingBotTimer = null; }
 
     // 自动引用知识库流程
+    console.log('[AutoKB] doSend called, _autoKbEnabled:', _autoKbEnabled);
     if (_autoKbEnabled) {
       var keywords = extractKeywords(text);
       console.log('[AutoKB] 提取关键词:', keywords);
@@ -2031,9 +2032,22 @@
         statusEl.textContent = '\u6b63\u5728\u641c\u7d22\u77e5\u8bc6\u5e93...';
       }
       var vaultPath = getObsidianVaultPath();
-      console.log('[AutoKB] Vault路径:', vaultPath || '(未设置，使用notepad)');
+      console.log('[AutoKB] Vault路径:', vaultPath || '(未设置)');
+      if (!vaultPath) {
+        // 没有设置 vault 路径，显示提示
+        if (statusEl) {
+          statusEl.textContent = '[AutoKB] Vault路径未设置，请先激活Obsidian Vault';
+          statusEl.style.color = T.red;
+        }
+        _doSendInternal(text, [], []);
+        return;
+      }
       searchVaultFiles(keywords, function(filePaths) {
         console.log('[AutoKB] 匹配文件:', filePaths.length, '个');
+        if (statusEl) {
+          statusEl.textContent = '[AutoKB] 找到 ' + filePaths.length + ' 个匹配文件';
+          statusEl.style.color = filePaths.length > 0 ? 'var(--hdc-accent)' : 'var(--hdc-fg-dim)';
+        }
         if (filePaths.length === 0) {
           _doSendInternal(text, [], []);
           return;
