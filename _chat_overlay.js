@@ -1864,15 +1864,27 @@
     ws.send(JSON.stringify({ jsonrpc: '2.0', id: rid, method: method, params: params || {} }));
   }
 
-  function listDirRecursive(dirPath, onDone) {
+  function listDirRecursive(dirPath, onDone, maxDepth) {
+    maxDepth = maxDepth || 3; // 限制搜索深度，避免搜索整个 vault
     var allFiles = [];
     var pending = 1;
+    var searchedDirs = 0;
     function checkDone() {
       pending--;
-      if (pending === 0) onDone(allFiles);
+      if (pending === 0) {
+        console.log('[AutoKB] 递归搜索完成，搜索了', searchedDirs, '个目录，找到', allFiles.length, '个 .md 文件');
+        onDone(allFiles);
+      }
     }
-    function walk(dir) {
+    function walk(dir, depth) {
+      depth = depth || 0;
+      if (depth >= maxDepth) {
+        console.log('[AutoKB] 达到最大深度', maxDepth, '，跳过', dir);
+        checkDone();
+        return;
+      }
       pending++;
+      searchedDirs++;
       rpcCall('fs.list_dir', { path: dir }, function(r) {
         console.log('[AutoKB] list_dir result:', dir, r.error ? 'error' : (r.items ? r.items.length + ' items' : 'no items'));
         if (r.error || !r.items) { checkDone(); return; }
@@ -1881,7 +1893,7 @@
           var e = entries[i];
           var fp = e.path || (dir + '/' + e.name);
           if (e.is_dir) {
-            walk(fp);
+            walk(fp, depth + 1);
           } else if (/\.md$/i.test(e.name)) {
             allFiles.push(fp);
           }
@@ -1889,7 +1901,7 @@
         checkDone();
       });
     }
-    walk(dirPath);
+    walk(dirPath, 0);
     checkDone();
   }
 
