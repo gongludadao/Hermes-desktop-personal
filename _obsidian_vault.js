@@ -105,29 +105,35 @@
     }
 
     function activateObsVault() {
+      console.log('[ObsVault] activateObsVault called');
       wsObsHeader.style.display = 'flex';
       toggleSection(wsObsBody, wsObsArrow);
       wsObsTree.innerHTML = '<div style="padding:20px 8px;text-align:center;color:var(--hdc-fg-dim);font-size:11px">\u52a0\u8f7d\u4e2d...</div>';
       var fid = String(++msgId);
       _rpcCallbacks[fid] = function(result) {
+        console.log('[ObsVault] obsidian.get_active result:', result);
         if (result.error || !result.path) {
+          console.log('[ObsVault] no vault path found');
           wsObsTree.innerHTML = '<div style="padding:20px 8px;text-align:center;color:var(--hdc-fg-dim);font-size:11px">\u672a\u914d\u7f6e\u4efb\u4f55 Obsidian \u4ed3\u5e93<br><br>\u70b9\u51fb [\u5207\u6362] \u9009\u6291\u4ed3\u5e93\u8def\u5f84</div>';
           return;
         }
         // 只有成功获取路径后才设置为激活状态
         _obsVaultActive = true;
         obsRoot = result.path;
+        console.log('[ObsVault] vault activated:', result.path);
         // 设置全局变量和 localStorage，供自动引用知识库使用
         window._obsidianVaultPath = result.path;
         try { localStorage.setItem('hdc_obsidian_vault', result.path); } catch(e) {}
         // 自动启用自动引用知识库功能
         if (typeof _autoKbEnabled !== 'undefined') {
           _autoKbEnabled = true;
+          console.log('[ObsVault] _autoKbEnabled set to true');
           var autoKbCheck = document.getElementById('hdc-auto-kb-check');
           if (autoKbCheck) autoKbCheck.checked = true;
         }
         loadObsDir(obsRoot, wsObsTree, 0);
       };
+      console.log('[ObsVault] sending obsidian.get_active request');
       ws.send(JSON.stringify({ jsonrpc: '2.0', id: fid, method: 'obsidian.get_active' }));
     }
 
@@ -168,9 +174,14 @@
     
     // WebSocket 连接后自动激活 Obsidian Vault
     function autoActivateObsVault() {
+      console.log('[ObsVault] autoActivateObsVault called, _obsVaultActive:', _obsVaultActive, 'ws.readyState:', ws ? ws.readyState : 'no ws');
       if (!_obsVaultActive && ws && ws.readyState === WebSocket.OPEN) {
+        console.log('[ObsVault] calling activateObsVault...');
         activateObsVault();
+      } else {
+        console.log('[ObsVault] skipping activateObsVault:', _obsVaultActive ? 'already active' : 'ws not ready');
       }
     }
     // 导出到全局，供 _chat_overlay.js 的 ws.onopen 调用
     window.autoActivateObsVault = autoActivateObsVault;
+    console.log('[ObsVault] autoActivateObsVault exported to window');

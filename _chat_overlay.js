@@ -1033,13 +1033,24 @@
     if (statusEl) statusEl.textContent = '\u6b63\u5728\u8fde\u63a5...';
 
     ws.onopen = function() {
+      console.log('[Overlay] ws.onopen triggered');
       if (statusEl) statusEl.textContent = '\u5df2\u8fde\u63a5\uff0c\u7b49\u5f99\u7f51\u5173\u5c31\u7eea...';
+      console.log('[Overlay] typeof loadAppConfig:', typeof loadAppConfig);
+      console.log('[Overlay] typeof window.autoActivateObsVault:', typeof window.autoActivateObsVault);
       if (typeof loadAppConfig === 'function') {
+        console.log('[Overlay] calling loadAppConfig...');
         loadAppConfig(function() {
+          console.log('[Overlay] loadAppConfig callback called');
           if (typeof initStockOnConnect === 'function') initStockOnConnect();
-          if (typeof window.autoActivateObsVault === 'function') window.autoActivateObsVault();
+          if (typeof window.autoActivateObsVault === 'function') {
+            console.log('[Overlay] calling window.autoActivateObsVault...');
+            window.autoActivateObsVault();
+          } else {
+            console.log('[Overlay] window.autoActivateObsVault not available');
+          }
         });
       } else {
+        console.log('[Overlay] loadAppConfig not available, calling autoActivateObsVault directly');
         if (typeof initStockOnConnect === 'function') initStockOnConnect();
         if (typeof window.autoActivateObsVault === 'function') window.autoActivateObsVault();
       }
