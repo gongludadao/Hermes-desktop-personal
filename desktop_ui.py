@@ -60,6 +60,51 @@ def _ensure_web_deps():
         subprocess.check_call([sys.executable, "-m", "pip", "install", "fastapi", "uvicorn[standard]", "-i", "https://mirrors.aliyun.com/pypi/simple/", "--trusted-host", "mirrors.aliyun.com"])
 
 
+def _ensure_embedding_deps():
+    """检查并安装 embedding 相关依赖（numpy, sentence-transformers）"""
+    deps_to_install = []
+    
+    # 检查 numpy（只检查是否存在，不导入）
+    try:
+        import importlib.util
+        if importlib.util.find_spec("numpy") is None:
+            deps_to_install.append("numpy")
+    except ImportError:
+        deps_to_install.append("numpy")
+    
+    # 检查 sentence-transformers（只检查是否存在，不导入）
+    try:
+        import importlib.util
+        if importlib.util.find_spec("sentence_transformers") is None:
+            deps_to_install.append("sentence-transformers")
+    except ImportError:
+        deps_to_install.append("sentence-transformers")
+    
+    if deps_to_install:
+        print(f"[Desktop] 缺失依赖: {deps_to_install}，正在自动安装...")
+        try:
+            # 尝试使用 uv 安装
+            subprocess.check_call(
+                ["uv", "pip", "install", "--python", sys.executable, "--break-system-packages"] + deps_to_install,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            print(f"[Desktop] 依赖安装完成: {deps_to_install}")
+        except subprocess.CalledProcessError:
+            # uv 安装失败，尝试使用 pip
+            print("[Desktop] uv 安装失败，尝试使用 pip...")
+            try:
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", "--break-system-packages"] + deps_to_install,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                print(f"[Desktop] 依赖安装完成: {deps_to_install}")
+            except subprocess.CalledProcessError as e:
+                print(f"[Desktop] 依赖安装失败: {e}")
+                print("[Desktop] 向量搜索功能将不可用，请手动安装: pip install numpy sentence-transformers")
+
+
 def _check_web_dist():
     web_dist = Path(os.environ.get("HERMES_WEB_DIST", HERMES_AGENT_DIR / "hermes_cli" / "web_dist"))
     if not web_dist.is_dir() or not (web_dist / "index.html").exists():
@@ -252,6 +297,9 @@ def _register_rpc_methods():
     from _rpc_obsidian import register as register_obsidian
     register_obsidian(gw)
 
+    from _rpc_embedding import register as register_embedding
+    register_embedding(gw)
+
 
 def _refresh_skills_cache():
     from pathlib import Path
@@ -353,7 +401,16 @@ def start_desktop(
     height: int = 800,
     locale: str = "zh",
 ):
+    print("[Desktop] 正在启动 Hermes Desktop...")
+    
+    # 检查并安装依赖
+    print("[Desktop] 检查 Web 依赖...")
     _ensure_web_deps()
+    
+    print("[Desktop] 检查 Embedding 依赖...")
+    _ensure_embedding_deps()
+    
+    print("[Desktop] 检查 Web 前端...")
     _check_web_dist()
 
     _start_gateway()

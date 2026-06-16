@@ -409,6 +409,9 @@
         _showLineNumbers(true);
         _updateLineNumbers();
         _initUndoStack();
+        // 显示状态栏
+        _showStatusBar(true);
+        _updateStatusBar();
       } else {
         editorTextarea.style.display = 'none';
         editorPreview.style.display = '';
@@ -416,6 +419,8 @@
         var toolbar = document.getElementById('hdc-editor-toolbar');
         if (toolbar) toolbar.style.display = 'none';
         _showLineNumbers(false);
+        // 隐藏状态栏
+        _showStatusBar(false);
         if (tab.dualPanel) {
           renderDualPanel(tab.dualPanel);
         } else if (tab.rawHtml !== null) {
@@ -631,6 +636,44 @@
       return 'code';
     }
 
+    // 加载 Markdown 中的本地图片，通过 RPC 读取转为 base64
+    function _loadLocalImages(container, filePath) {
+      var imgs = container.querySelectorAll('img');
+      imgs.forEach(function(img) {
+        var src = img.getAttribute('src');
+        if (!src) return;
+        // 跳过已经是 data URL 或 http URL 的图片
+        if (src.indexOf('data:') === 0 || src.indexOf('http') === 0) return;
+        // 解析本地路径
+        var imgPath = src;
+        if (imgPath.indexOf('/') === 0 || imgPath.indexOf('\\') === 0) {
+          // 绝对路径直接使用
+        } else if (filePath) {
+          // 相对路径，基于当前文件目录
+          var lastSlash = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'));
+          if (lastSlash >= 0) {
+            imgPath = filePath.substring(0, lastSlash + 1) + imgPath;
+          }
+        }
+        // 通过 RPC 读取图片
+        var rpcId = String(++msgId);
+        _rpcCallbacks[rpcId] = function(result) {
+          if (result && result.error) return;
+          if (result && result.content) {
+            var ext = (imgPath.split('.').pop() || 'png').toLowerCase();
+            var mime = ext === 'jpg' ? 'jpeg' : ext;
+            img.src = 'data:image/' + mime + ';base64,' + result.content;
+          }
+        };
+        ws.send(JSON.stringify({
+          jsonrpc: '2.0',
+          id: rpcId,
+          method: 'fs.read_file',
+          params: { path: imgPath }
+        }));
+      });
+    }
+
     function renderPreview(content, ext, path) {
       if (!editorPreview) return;
       editorPreview.innerHTML = '';
@@ -653,7 +696,10 @@
       }
 
       if (ftype === 'markdown') {
-        editorPreview.innerHTML = '<div style="font-family:var(--hdc-font)">' + renderMarkdown(content) + '</div>';
+        var rendered = renderMarkdown(content);
+        editorPreview.innerHTML = '<div style="font-family:var(--hdc-font)">' + rendered + '</div>';
+        // 处理本地图片路径：通过 RPC 读取并转为 base64
+        _loadLocalImages(editorPreview, path);
         return;
       }
 
@@ -845,6 +891,9 @@
       _showLineNumbers(true);
       _updateLineNumbers();
       _initUndoStack();
+      // 显示状态栏
+      _showStatusBar(true);
+      _updateStatusBar();
     }
 
     function exitEditMode() {
@@ -862,6 +911,8 @@
       var toolbar = document.getElementById('hdc-editor-toolbar');
       if (toolbar) toolbar.style.display = 'none';
       _showLineNumbers(false);
+      // 隐藏状态栏
+      _showStatusBar(false);
       var ext = getFileExt(currentFilePath || '');
       renderPreview(currentFileContent, ext || 'md', currentFilePath);
     }
@@ -955,6 +1006,9 @@
       _isPanelCollapsed = true;
       _panelWidthBeforeCollapse = editorPanel.offsetWidth;
       
+      // 隐藏状态栏
+      _showStatusBar(false);
+      
       // 隐藏调整器
       if (editorResizerEl) editorResizerEl.style.display = 'none';
       
@@ -1039,6 +1093,12 @@
         editorPanel.style.transition = '';
         editorPanel.style.flex = '1';
       }, 300);
+      
+      // 恢复状态栏（如果在编辑模式且非diff模式）
+      if (isEditMode && !diffMode) {
+        _showStatusBar(true);
+        _updateStatusBar();
+      }
     }
 
     // ✅ 收起按钮点击事件
@@ -1105,6 +1165,153 @@
       exitEditMode();
     };
 
+    // ── 字数统计状态栏 ──
+    var _statusBarEl = null;
+
+    function _initStatusBar() {
+      if (_statusBarEl) return;
+      _statusBarEl = document.createElement('div');
+      _statusBarEl.id = 'hdc-editor-statusbar';
+      _statusBarEl.style.cssText = 'display:none;position:absolute;bottom:0;left:0;right:0;height:24px;background:var(--hdc-card);border-top:1px solid var(--hdc-border);font-size:11px;color:var(--hdc-fg-dim);padding:0 10px;line-height:24px;text-align:right;z-index:4;flex-shrink:0;user-select:none';
+      var body = document.getElementById('hdc-editor-body');
+      if (body) {
+        body.style.position = 'relative';
+        body.appendChild(_statusBarEl);
+      }
+    }
+
+    function _updateStatusBar() {
+      if (!_statusBarEl) return;
+      if (!isEditMode || diffMode || _isPanelCollapsed) {
+        _statusBarEl.style.display = 'none';
+        return;
+      }
+      _statusBarEl.style.display = 'block';
+      var text = editorTextarea.value || '';
+      var lineCount = text.split('\n').length;
+      var charCount = text.replace(/\n/g, '').length;
+      // 中文字符计数
+      var chineseMatches = text.match(/[\u4e00-\u9fff]/g);
+      var chineseCount = chineseMatches ? chineseMatches.length : 0;
+      // 英文单词计数
+      var englishMatches = text.match(/[a-zA-Z]+/g);
+      var englishCount = englishMatches ? englishMatches.length : 0;
+      var wordCount = chineseCount + englishCount;
+      _statusBarEl.textContent = '\u884c ' + lineCount + '  \u00b7  \u5b57 ' + wordCount + '  \u00b7  \u5b57\u7b26 ' + charCount;
+    }
+
+    function _showStatusBar(show) {
+      if (!_statusBarEl) _initStatusBar();
+      if (_statusBarEl) {
+        _statusBarEl.style.display = show ? 'block' : 'none';
+        // 给 textarea 底部留出空间，避免被状态栏遮挡
+        editorTextarea.style.paddingBottom = show ? '30px' : '';
+        editorTextarea.style.boxSizing = show ? 'border-box' : '';
+      }
+    }
+
+    // ── 图片粘贴功能 ──
+    function _initImagePaste() {
+      editorTextarea.addEventListener('paste', function(e) {
+        var clipboardData = e.clipboardData || (e.originalEvent && e.originalEvent.clipboardData);
+        if (!clipboardData) return;
+        var items = clipboardData.items;
+        if (!items) return;
+
+        // 检查是否有图片类型
+        var imageItem = null;
+        var imageType = '';
+        for (var i = 0; i < items.length; i++) {
+          if (items[i].type.indexOf('image/') === 0) {
+            imageItem = items[i];
+            imageType = items[i].type;
+            break;
+          }
+        }
+
+        if (!imageItem) return; // 没有图片，让默认粘贴行为继续
+
+        e.preventDefault();
+
+        var blob = imageItem.getAsFile();
+        if (!blob) return;
+
+        var reader = new FileReader();
+        reader.onload = function() {
+          var dataUrl = reader.result;
+          // dataUrl 格式: data:image/png;base64,xxxxx
+          var base64Index = dataUrl.indexOf(',');
+          var base64Data = dataUrl.substring(base64Index + 1);
+
+          // 确定文件扩展名
+          var ext = 'png';
+          if (imageType === 'image/jpeg') ext = 'jpg';
+          else if (imageType === 'image/gif') ext = 'gif';
+          else if (imageType === 'image/webp') ext = 'webp';
+
+          // 生成文件名
+          var now = new Date();
+          var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
+          var filename = 'paste_' + now.getFullYear() +
+            pad(now.getMonth() + 1) +
+            pad(now.getDate()) + '_' +
+            pad(now.getHours()) +
+            pad(now.getMinutes()) +
+            pad(now.getSeconds()) + '.' + ext;
+
+          // 确定保存路径
+          var savePath = '';
+          if (currentFilePath) {
+            var lastSlash = Math.max(currentFilePath.lastIndexOf('/'), currentFilePath.lastIndexOf('\\'));
+            if (lastSlash >= 0) {
+              savePath = currentFilePath.substring(0, lastSlash + 1) + filename;
+            } else {
+              savePath = filename;
+            }
+          } else {
+            savePath = filename;
+          }
+
+          // 通过 fs.write_file RPC 保存图片
+          var rpcId = String(++msgId);
+          _rpcCallbacks[rpcId] = function(result) {
+            if (result && result.error) {
+              // 保存失败，插入提示
+              var insertText = '![paste_image](' + savePath + ')';
+              _insertTextAtCursor(insertText);
+              return;
+            }
+            // 保存成功，插入 Markdown 图片语法
+            var insertText = '![paste_image](' + savePath + ')';
+            _insertTextAtCursor(insertText);
+          };
+          ws.send(JSON.stringify({
+            jsonrpc: '2.0',
+            id: rpcId,
+            method: 'fs.write_file',
+            params: { path: savePath, content: base64Data, encoding: 'base64' }
+          }));
+        };
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    function _insertTextAtCursor(text) {
+      var start = editorTextarea.selectionStart;
+      var end = editorTextarea.selectionEnd;
+      var value = editorTextarea.value;
+      editorTextarea.value = value.substring(0, start) + text + value.substring(end);
+      var newPos = start + text.length;
+      editorTextarea.setSelectionRange(newPos, newPos);
+      editorTextarea.dispatchEvent(new Event('input'));
+      editorTextarea.focus();
+    }
+
+    // 初始化图片粘贴
+    _initImagePaste();
+    // 初始化状态栏
+    _initStatusBar();
+
     editorTextarea.oninput = function() {
       if (editorTextarea.value !== currentFileContent) {
         // ✅ 更新当前标签内容
@@ -1126,11 +1333,16 @@
         }, 800);
         // 更新行号
         _updateLineNumbers();
+        // 更新状态栏
+        _updateStatusBar();
         // 延迟入栈撤销
         if (_undoTimer) clearTimeout(_undoTimer);
         _undoTimer = setTimeout(function() {
           _pushUndo();
         }, 300);
+      } else {
+        // 即使内容没变化也更新状态栏（如初始加载时）
+        _updateStatusBar();
       }
     };
 
@@ -1857,6 +2069,8 @@
       if (toolbar) toolbar.style.display = 'none';
       // 隐藏行号
       _showLineNumbers(false);
+      // 隐藏状态栏
+      _showStatusBar(false);
       bindDiffButtonEvents();
       document.addEventListener('keydown', handleDiffKeydown);
     }
@@ -1881,6 +2095,9 @@
         // 恢复增强功能
         _showLineNumbers(true);
         _updateLineNumbers();
+        // 恢复状态栏
+        _showStatusBar(true);
+        _updateStatusBar();
         // 恢复滚动位置
         editorTextarea.scrollTop = _preDiffScrollTop;
       } else {

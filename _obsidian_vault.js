@@ -125,16 +125,16 @@
         window._obsidianVaultPath = result.path;
         try { localStorage.setItem('hdc_obsidian_vault', result.path); } catch(e) {}
         // 自动启用自动引用知识库功能
-        if (typeof _autoKbEnabled !== 'undefined') {
-          _autoKbEnabled = true;
-          console.log('[ObsVault] _autoKbEnabled set to true');
-          var autoKbCheck = document.getElementById('hdc-auto-kb-check');
-          if (autoKbCheck) autoKbCheck.checked = true;
-          // 在状态栏显示成功信息
-          if (statusEl) {
-            statusEl.textContent = '[ObsVault] 已激活: ' + result.path;
-            statusEl.style.color = 'var(--hdc-accent)';
-          }
+        window._autoKbEnabled = true;
+        console.log('[ObsVault] window._autoKbEnabled set to true');
+        var autoKbCheck = document.getElementById('hdc-auto-kb-check');
+        if (autoKbCheck) autoKbCheck.checked = true;
+        // 触发向量索引构建（如果函数存在）
+        if (typeof window.buildEmbeddingIndex === 'function') {
+          console.log('[ObsVault] 开始构建向量索引...');
+          window.buildEmbeddingIndex(function(success) {
+            console.log('[ObsVault] 向量索引构建结果:', success);
+          });
         }
         loadObsDir(obsRoot, wsObsTree, 0);
       };
@@ -187,6 +187,41 @@
         console.log('[ObsVault] skipping activateObsVault:', _obsVaultActive ? 'already active' : 'ws not ready');
       }
     }
+    
+    // 定期检查 vault 路径是否变化（每5秒检查一次）
+    var _vaultCheckTimer = null;
+    function startVaultPathMonitor() {
+      if (_vaultCheckTimer) return; // 已经启动了
+      _vaultCheckTimer = setInterval(function() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        var fid = String(++msgId);
+        _rpcCallbacks[fid] = function(result) {
+          if (result.error || !result.path) return;
+          var newPath = result.path;
+          var oldPath = window._obsidianVaultPath || localStorage.getItem('hdc_obsidian_vault');
+          if (newPath !== oldPath) {
+            console.log('[ObsVault] vault path changed:', oldPath, '->', newPath);
+            // 更新全局变量和 localStorage
+            window._obsidianVaultPath = newPath;
+            try { localStorage.setItem('hdc_obsidian_vault', newPath); } catch(e) {}
+            // 更新状态栏显示
+            if (typeof statusEl !== 'undefined' && statusEl) {
+              var kbStatus = window._autoKbEnabled ? ('[AutoKB] vault: ' + newPath) : '';
+              statusEl.textContent = '就绪' + (kbStatus ? ' | ' + kbStatus : '');
+            }
+            // 重新加载 vault 目录
+            if (wsObsTree) {
+              wsObsTree.innerHTML = '';
+              loadObsDir(newPath, wsObsTree, 0);
+            }
+          }
+        };
+        ws.send(JSON.stringify({ jsonrpc: '2.0', id: fid, method: 'obsidian.get_active' }));
+      }, 5000);
+      console.log('[ObsVault] vault path monitor started');
+    }
+    
     // 导出到全局，供 _chat_overlay.js 的 ws.onopen 调用
     window.autoActivateObsVault = autoActivateObsVault;
+    window.startVaultPathMonitor = startVaultPathMonitor;
     console.log('[ObsVault] autoActivateObsVault exported to window');
