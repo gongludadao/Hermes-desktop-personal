@@ -852,13 +852,17 @@ def register(gw):
             if not vault_path or not os.path.isdir(vault_path):
                 return
             
-            # 收集当前所有文件
+            # 收集当前所有文件（排除 main 目录，和 _start_background_update 一致）
             current_files = set()
             for root, dirs, files in os.walk(vault_path):
                 dirs[:] = [d for d in dirs if not d.startswith('.')]
                 for fn in files:
                     if not fn.startswith('.'):
-                        current_files.add(os.path.join(root, fn))
+                        fp = os.path.join(root, fn)
+                        # 跳过 main 目录下的文件（由 MainProcessor 处理，不纳入索引）
+                        if "\\main\\" in fp.replace('/', '\\') or fp.endswith("main"):
+                            continue
+                        current_files.add(fp)
             
             cached_files = set(item.get("path") for item in cached_index.get("index", []))
             new_files = current_files - cached_files
@@ -1029,3 +1033,9 @@ def register(gw):
     
     print("[Embedding] RPC 方法已注册")
     print(f"[Embedding] 使用本地模型：{_embedding_model_name}")
+    
+    # 异步预加载模型，不影响 RPC 启动
+    def _preload():
+        _load_model()
+    t = threading.Thread(target=_preload, daemon=True, name="embedding-preload")
+    t.start()
