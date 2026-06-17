@@ -1,9 +1,94 @@
+"""
+Obsidian vault RPC — watchdog passive file monitoring.
+"""
+
 import os
 import json
+import time
+import threading
 from pathlib import Path
+from typing import Optional
 
 
 _OBSIDIAN_CONFIG = Path(__file__).parent.resolve() / "cache" / "obsidian_config.json"
+
+
+import _broadcast
+
+
+class _VaultWatcher:
+    """Watchdog-based passive file monitor for vault directory."""
+
+    def __init__(self):
+        self._observer = None
+        self._version = 0
+        self._lock = threading.Lock()
+        self._watch_path: Optional[str] = None
+
+    def start_watching(self, vault_path: str) -> None:
+        self.stop_watching()
+        if not vault_path or not os.path.isdir(vault_path):
+            return
+
+        # Windows 需要反斜杠路径，Watchdog 才能正常工作
+        native_path = os.path.normpath(vault_path)
+        self._watch_path = native_path.replace("\\", "/")  # 内部统一用正斜杠
+        try:
+            from watchdog.observers import Observer
+            from watchdog.events import FileSystemEventHandler
+
+            class _Handler(FileSystemEventHandler):
+                def __init__(self, watcher: "_VaultWatcher"):
+                    self.watcher = watcher
+                    import time as _time
+                    self._last_push = 0
+                def _inc(self, event):
+                    import time as _time
+                    now = _time.time()
+                    # 去抖：2000ms 内不重复推送（防止系统进程在读取文件时触发 on_modified）
+                    if now - self._last_push < 2.0:
+                        return
+                    self._last_push = now
+                    src = event.src_path.replace("\\", "/")
+                    name = os.path.basename(src)
+                    if name.startswith(".") or name.endswith((".tmp", ".swp")):
+                        return
+                    with self.watcher._lock:
+                        self.watcher._version += 1
+                    _broadcast.push_event("obsidian.vault_changed", {"version": self.watcher._version})
+                def on_created(self, e):   self._inc(e)
+                def on_deleted(self, e):    self._inc(e)
+                def on_moved(self, e):
+                    if e.dest_path:
+                        self._inc(e)
+
+            self._observer = Observer()
+            self._observer.schedule(_Handler(self), native_path, recursive=True)
+            self._observer.start()
+            print(f"[ObsVault] watchdog 监控已启动：{native_path}")
+
+        except ImportError:
+            print("[ObsVault] watchdog 未安装，无法监控")
+        except Exception as exc:
+            print(f"[ObsVault] watchdog 启动失败: {exc}")
+
+    def stop_watching(self) -> None:
+        if self._observer is not None:
+            try:
+                self._observer.stop()
+                self._observer.join(timeout=2)
+            except Exception:
+                pass
+            self._observer = None
+        self._watch_path = None
+
+    @property
+    def version(self) -> int:
+        with self._lock:
+            return self._version
+
+
+_vault_watcher = _VaultWatcher()
 
 
 def _ensure_config():
@@ -13,17 +98,14 @@ def _ensure_config():
 
 
 def register(gw):
+    _broadcast.init(gw)
     _ensure_config()
 
     def _obsidian_get_active(rid, params):
         try:
             config = json.loads(_OBSIDIAN_CONFIG.read_text(encoding="utf-8"))
             path = config.get("active_vault")
-            # 验证路径是否存在
-            if path and os.path.isdir(path):
-                return gw._ok(rid, {"path": path})
-            else:
-                return gw._ok(rid, {"path": None})
+            return gw._ok(rid, {"path": path if path and os.path.isdir(path) else None})
         except Exception as e:
             return gw._err(rid, 5000, str(e))
 
@@ -40,6 +122,7 @@ def register(gw):
             config["last_switched"] = time.strftime("%Y-%m-%d %H:%M:%S")
             with open(_OBSIDIAN_CONFIG, "w", encoding="utf-8") as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
+            _vault_watcher.start_watching(path)
             return gw._ok(rid, {"success": True, "path": path})
         except Exception as e:
             return gw._err(rid, 5000, str(e))
@@ -62,7 +145,6 @@ def register(gw):
                     })
                 except OSError:
                     continue
-            # Sort: dirs first, then files, both alphabetically
             items.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
             return gw._ok(rid, {"items": items})
         except Exception as e:
@@ -126,11 +208,13 @@ def register(gw):
         return gw._ok(rid, {"id": note_id})
 
     def _obsidian_select_vault(rid, params):
-        # 选择 Vault，弹出系统目录选择器
-        # 这里只记录提示，具体 UI 由前端处理
         return gw._ok(rid, {"show_selector": True})
 
-    import time
+    def _obsidian_get_vault_version(rid, params):
+        ver = _vault_watcher.version
+        print(f"[ObsVault] 查询版本号: {ver}, watch_path={_vault_watcher._watch_path}")
+        return gw._ok(rid, {"version": ver})
+
     gw._methods["obsidian.get_active"] = _obsidian_get_active
     gw._methods["obsidian.set_vault"] = _obsidian_set_vault
     gw._methods["obsidian.list_files"] = _obsidian_list_files
@@ -139,6 +223,12 @@ def register(gw):
     gw._methods["obsidian.create_note"] = _obsidian_create_note
     gw._methods["obsidian.delete_note"] = _obsidian_delete_note
     gw._methods["obsidian.select_vault"] = _obsidian_select_vault
+    gw._methods["obsidian.get_vault_version"] = _obsidian_get_vault_version
+
+    # 自动启动对已配置 vault 的监控
+    active = _get_active_vault()
+    if active:
+        _vault_watcher.start_watching(active)
 
 
 def _get_active_vault():

@@ -301,6 +301,44 @@ def _register_rpc_methods():
     register_embedding(gw)
 
 
+_main_processor = None
+
+def _init_main_processor():
+    """Initialize MainProcessor"""
+    global _main_processor
+    
+    try:
+        sys.path.insert(0, str(_DESKTOP_DIR))
+        from organizer_main.processor import MainProcessor
+        
+        processor_path = _DESKTOP_DIR / "organizer_main"
+        config_path = processor_path / "config.yaml"
+        
+        if config_path.exists():
+            # 获取 WebSocket token（和 web 服务器同进程）
+            import hermes_cli.web_server as _ws_module
+            ws_token = _ws_module._SESSION_TOKEN
+            
+            _main_processor = MainProcessor(config_path=str(config_path), ws_token=ws_token, gateway_proc=_gateway_proc)
+            
+            # 不处理已有文件，只监控新文件变化
+            # process_all() 可以手动触发
+            
+            # Start monitoring
+            _main_processor.start()
+            print("[MainProcessor] Wiki Main Processor initialized and started")
+            return True
+        else:
+            print("[MainProcessor] Config file not found, skipping initialization")
+            return False
+            
+    except Exception as e:
+        print(f"[MainProcessor] Initialization failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def _refresh_skills_cache():
     from pathlib import Path
     hermes_home = Path(
@@ -418,6 +456,10 @@ def start_desktop(
     _add_web_proxy()
     _sync_skill()
     _register_rpc_methods()
+    
+    # Initialize MainProcessor
+    print("[Desktop] 初始化 Wiki Main Processor...")
+    _init_main_processor()
 
     from hermes_cli.web_server import start_server
 

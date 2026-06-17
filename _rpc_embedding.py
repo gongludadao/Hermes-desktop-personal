@@ -200,16 +200,8 @@ def _compute_embedding_batch(texts):
                     print(f"[Embedding] 确定稳定 batch_size={cur_batch}")
                 
                 consecutive_oom = 0
-                consecutive_success += 1
                 
-                # 稳定运行后，每 20 次成功尝试升级一次 batch_size（直到 max_batch_size）
-                # 这样能逐步找到显存允许的最大 batch，提升吞吐
-                if found_stable and consecutive_success >= 20 and stable_batch_size < max_batch_size:
-                    new_bs = min(stable_batch_size * 2, max_batch_size)
-                    if new_bs > stable_batch_size:
-                        print(f"[Embedding] 尝试升级 batch_size {stable_batch_size} → {new_bs}")
-                        stable_batch_size = new_bs
-                        consecutive_success = 0
+                # 不再升级 batch_size，保持稳定值
                 
                 # 每个批次后清理（DirectML 显存回收较慢）
                 import gc
@@ -241,12 +233,11 @@ def _compute_embedding_batch(texts):
                         except Exception:
                             pass
                     
-                    # 已经找到稳定 batch 后再次 OOM（可能是某个特别长的文件），直接降到稳定值-1 重试
+                    # 稳定后遇到 OOM，跳过当前文件（不改变 batch_size）
                     if found_stable:
-                        new_bs = max(1, stable_batch_size // 2)
-                        if new_bs < stable_batch_size:
-                            print(f"[Embedding] 稳定后 OOM，临时降 batch {stable_batch_size} → {new_bs}")
-                            stable_batch_size = new_bs
+                        print(f"[Embedding] 文件过大 OOM，跳过当前文件，保持 batch_size={stable_batch_size}")
+                        all_embeddings.append([0.0] * 1024)  # 占位向量
+                        i += 1
                         continue
                     
                     if batch_size > 1:
@@ -477,9 +468,35 @@ def register(gw):
             # Sort by similarity
             results.sort(key=lambda x: x["similarity"], reverse=True)
             
-            # Return top_k results
-            top_results = results[:top_k]
-            return gw._ok(rid, {"results": top_results, "total": len(results)})
+            # 按路径去重并收集每个文件的所有 chunk
+            file_chunks = {}
+            for r in results:
+                path = r["path"]
+                if path not in file_chunks:
+                    file_chunks[path] = []
+                file_chunks[path].append(r)
+            
+            # 限制文件数量，保留 top_k 个文件
+            top_file_paths = list(file_chunks.keys())[:top_k]
+            
+            # 返回这些文件的完整信息（包含所有 chunk）
+            deduped_results = []
+            for path in top_file_paths:
+                chunks = file_chunks[path]
+                # 取平均相似度作为该文件的代表分数
+                avg_similarity = sum(c["similarity"] for c in chunks) / len(chunks)
+                deduped_results.append({
+                    "path": path,
+                    "similarity": float(avg_similarity),
+                    "fileName": chunks[0]["fileName"],
+                    "chunkCount": len(chunks),  # 新增字段：该文件有多少 chunk 匹配
+                    "chunks": chunks  # 新增字段：包含所有匹配的 chunk
+                })
+            
+            # Sort files by average similarity
+            deduped_results.sort(key=lambda x: x["similarity"], reverse=True)
+            
+            return gw._ok(rid, {"results": deduped_results, "total": len(deduped_results)})
         except Exception as e:
             return gw._err(rid, 5000, str(e))
 
@@ -623,14 +640,21 @@ def register(gw):
                 max_content_length = 20000
                 
                 index_data = cached_index.get("index", [])
+                
                 # Remove all chunks of deleted files
                 index_data = [item for item in index_data if item.get("path") not in deleted_files]
+                
+                # Remove all chunks in main directory
+                index_data = [item for item in index_data if "\\main\\" not in item.get("path", "").replace('/', '\\') and not item.get("path", "").endswith("\\main")]
+                
+                # Filter out new files in main directory
+                new_files_filtered = [f for f in new_files if "\\main\\" not in f.replace('/', '\\') and not f.endswith("\\main")]
                 
                 # Collect new/modified files' chunks
                 texts_to_encode = []
                 chunk_metadata = []
                 
-                for i, fp in enumerate(new_files):
+                for i, fp in enumerate(new_files_filtered):
                     try:
                         fileName = os.path.basename(fp)
                         file_ext = os.path.splitext(fp)[1].lower()
@@ -734,10 +758,13 @@ def register(gw):
                 "total": _index_build_status["total"]
             })
         
-        # Collect all files
+        # Collect all files (exclude archive folders + main directory)
+        # 排除归档文件夹和 main 目录（包含待处理文件）
+        _EXCLUDE_DIRS = {'_archive', 'archive', '_archived', 'archived', '_old', 'old', 'trash', '.trash', '_archive_old', 'archive_old', 'main'}
         all_files = []
         for root, dirs, files in os.walk(vault_path):
-            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            # 排除隐藏目录 + 归档目录 + main 目录
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d.lower() not in _EXCLUDE_DIRS]
             for f in files:
                 if not f.startswith('.'):
                     all_files.append(os.path.join(root, f))

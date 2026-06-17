@@ -423,6 +423,7 @@
         '<span>\ud83d\udcd8</span>' +
         '<span style="font-size:12px;color:var(--hdc-fg)">Obsidian \u4ed3\u5e93</span>' +
         '<span style="flex:1"></span>' +
+        '<button id="hdc-ws-obs-refresh" title="\u5237\u65b0\u76ee\u5f55\u6811" style="background:transparent;border:1px solid var(--hdc-border);border-radius:3px;padding:2px 6px;color:var(--hdc-fg-dim);font-size:10px;cursor:pointer">\u21bb</button>' +
         '<button id="hdc-ws-obs-switch-vault" title="\u5207\u6362\u4ed3\u5e93" style="background:transparent;border:1px solid var(--hdc-border);border-radius:3px;padding:2px 6px;color:var(--hdc-fg-dim);font-size:10px;cursor:pointer">\ud83d\udd04</button>' +
       '</div>' +
       '<div id="hdc-ws-obs-body" style="display:none;flex-direction:column;overflow:hidden">' +
@@ -506,7 +507,7 @@
       'ws-clip-count', 'ws-clip-refresh', 'ws-note-context-menu', 'ws-clip-context-menu',
       'ws-stock-header', 'ws-stock-body', 'ws-stock-arrow', 'ws-stock-input',
       'ws-stock-add', 'ws-stock-dropdown', 'ws-obs-header', 'ws-obs-body',
-      'ws-obs-arrow', 'ws-obs-tree', 'ws-obs-switch-vault',
+      'ws-obs-arrow', 'ws-obs-tree', 'ws-obs-switch-vault', 'ws-obs-refresh',
       'ws-stock-refresh', 'ws-stock-list', 'ws-stock-status', 'ws-stock-context-menu',
       'editor-panel', 'editor-filename', 'editor-textarea', 'editor-preview',
       'editor-edit', 'resizer-editor', 'resizer-sidebar',
@@ -567,6 +568,7 @@
     var wsObsArrow = ui['ws-obs-arrow'];
     var wsObsTree = ui['ws-obs-tree'];
     var wsObsSwitchVault = ui['ws-obs-switch-vault'];
+    var wsObsRefresh = ui['ws-obs-refresh'];
     var _stockSearchTimer = null;
     var wsStockRefresh = ui['ws-stock-refresh'];
     var wsStockList = ui['ws-stock-list'];
@@ -1054,11 +1056,6 @@
           } else {
             console.log('[Overlay] window.autoActivateObsVault not available');
           }
-          // 启动 vault 路径监听
-          if (typeof window.startVaultPathMonitor === 'function') {
-            console.log('[Overlay] calling window.startVaultPathMonitor...');
-            window.startVaultPathMonitor();
-          }
         });
       } else {
         console.log('[Overlay] loadAppConfig not available, calling autoActivateObsVault directly');
@@ -1269,6 +1266,43 @@
           case 'clipboard.changed':
             if (p.text && typeof window.onClipboardChanged === 'function') {
               window.onClipboardChanged(p.text);
+            }
+            break;
+
+          case 'obsidian.vault_changed':
+            // 前端去抖：3 秒内不重复刷新
+            if (window._lastTreeRefresh && Date.now() - window._lastTreeRefresh < 3000) {
+              console.log('[Overlay] obsidian.vault_changed debounced, skip');
+              break;
+            }
+            window._lastTreeRefresh = Date.now();
+            console.log('[Overlay] obsidian.vault_changed event received, version:', p.version);
+            addMsg('[ObsVault] \u68c0\u6d4b\u5230\u6587\u4ef6\u53d8\u5316\uff0c\u6b63\u5728\u5237\u65b0\u6811...', 'sys');
+            if (typeof window._refreshVaultTree === 'function') {
+              window._refreshVaultTree();
+            } else {
+              // 回退：直接重新加载根目录
+              if (typeof obsRoot !== 'undefined' && obsRoot && typeof wsObsTree !== 'undefined' && wsObsTree) {
+                obsTreeContainers = {};
+                wsObsTree.innerHTML = '';
+                loadObsDir(obsRoot, wsObsTree, 0);
+              }
+            }
+            break;
+
+          case 'project.file_changed':
+            // 前端去抖：3 秒内不重复刷新
+            if (window._lastTreeRefresh && Date.now() - window._lastTreeRefresh < 3000) {
+              console.log('[Overlay] project.file_changed debounced, skip');
+              break;
+            }
+            window._lastTreeRefresh = Date.now();
+            addMsg('[Project] \u68c0\u6d4b\u5230\u6587\u4ef6\u53d8\u5316\uff0c\u6b63\u5728\u5237\u65b0\u9879\u76ee\u6811...', 'sys');
+            if (typeof window.refreshProjectTree === 'function') {
+              window.refreshProjectTree();
+              addMsg('[Project] refreshProjectTree \u8c03\u7528\u5b8c\u6210', 'sys');
+            } else {
+              addMsg('[Project] refreshProjectTree \u672a\u627e\u5230\uff01', 'sys');
             }
             break;
 
@@ -2209,27 +2243,82 @@
           _doSendInternal(text, [], []);
           return;
         }
-        // 直接用 chunk 内容构造 snippet 附件，不再读取整个文件
+        // 读取完整文件内容（不再只注入片段）
         var extraAttachments = [];
         var quotedNames = [];
-        for (var i = 0; i < matchedChunks.length; i++) {
-          var chunk = matchedChunks[i];
-          var name = chunk.fileName || (chunk.path.split(/[\\/]/).pop() || chunk.path);
-          var chunkLabel = chunk.chunkTotal > 1 ? 
-            ' [片段 ' + (chunk.chunkIdx + 1) + '/' + chunk.chunkTotal + ']' : '';
-          extraAttachments.push({
-            type: 'snippet',
-            fileName: name + chunkLabel,
-            filePath: chunk.path,
-            content: chunk.content,
-            lang: 'markdown',
-            startLine: chunk.charStart,
-            endLine: chunk.charEnd
-          });
-          quotedNames.push(name.replace(/\.md$/i, ''));
+        
+        // 收集所有匹配的文件路径（按相似度排序后的前 top_k 个文件）
+        var filesToRead = [];
+        for (var i = 0; i < matchedChunks.length && i < _autoKbMaxFiles; i++) {
+          if (matchedChunks[i].path) {
+            filesToRead.push(matchedChunks[i]);
+          }
         }
-        if (statusEl) statusEl.textContent = '已注入 ' + extraAttachments.length + ' 个相关片段';
-        _doSendInternal(text, extraAttachments, quotedNames);
+        
+        // 如果使用了新的返回格式（包含 chunks），合并同一文件的所有信息
+        var uniqueFiles = {};
+        for (var i = 0; i < filesToRead.length; i++) {
+          var chunk = filesToRead[i];
+          var path = chunk.path;
+          if (!uniqueFiles[path]) {
+            uniqueFiles[path] = chunk;
+            console.log('[AutoKB] 将读取完整文件:', path, '(匹配到', chunk.chunkCount || 1, '个相关片段)');
+          }
+        }
+        
+        // 读取所有文件的完整内容并构建附件
+        var readCount = Object.keys(uniqueFiles).length;
+        var attachmentsBuilt = [];
+        
+        for (var path in uniqueFiles) {
+          var chunk = uniqueFiles[path];
+          
+          // 检查是否有完整的 chunkText，如果没有则需要读取文件
+          if (chunk.content && chunk.chunkTotal === 1) {
+            // 单 chunk 文件且已有内容，直接使用
+            var name = chunk.fileName || (chunk.path.split(/[\\/]/).pop() || chunk.path);
+            attachmentsBuilt.push({
+              type: 'snippet',
+              fileName: name,
+              filePath: path,
+              content: chunk.content,
+              lang: 'markdown'
+            });
+            quotedNames.push(name.replace(/\.md$/i, ''));
+          } else {
+            // 多 chunk 或无内容，读取完整文件
+            rpcCall('fs.read_file', { path: path }, function(r) {
+              if (r.error) {
+                console.log('[AutoKB] 读取文件失败:', path, r.error.message);
+                return;
+              }
+              
+              var name = chunk.fileName || (path.split(/[\\/]/).pop() || path);
+              attachmentsBuilt.push({
+                type: 'snippet',
+                fileName: name + ' (' + (chunk.chunkCount || 'full') + ')',
+                filePath: path,
+                content: r.content,
+                lang: 'markdown'
+              });
+              quotedNames.push(name.replace(/\.md$/i, ''));
+              
+              // 所有文件读取完成后发送
+              if (attachmentsBuilt.length >= readCount) {
+                if (statusEl) statusEl.textContent = '已注入 ' + attachmentsBuilt.length + ' 个相关文件';
+                _doSendInternal(text, attachmentsBuilt, Array.from(new Set(quotedNames)));
+              }
+            });
+          }
+        }
+        
+        // 如果没有需要异步读取的，立即发送
+        if (attachmentsBuilt.length === readCount && readCount > 0) {
+          if (statusEl) statusEl.textContent = '已注入 ' + attachmentsBuilt.length + ' 个相关文件';
+          _doSendInternal(text, attachmentsBuilt, Array.from(new Set(quotedNames)));
+        } else if (readCount === 0) {
+          _doSendInternal(text, [], []);
+        }
       });
       return;
     }

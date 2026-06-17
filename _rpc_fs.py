@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import _broadcast
+
 
 def register(gw):
     """Register all file-system RPC handlers."""
@@ -365,6 +367,60 @@ def register(gw):
         except Exception as e:
             return gw._err(rid, 5000, str(e))
 
+    # ── 项目目录 watchdog 监控 ──
+    _project_observer = None
+
+    def _stop_project_watcher():
+        nonlocal _project_observer
+        if _project_observer is not None:
+            try:
+                _project_observer.stop()
+                _project_observer.join(timeout=2)
+            except Exception:
+                pass
+            _project_observer = None
+
+    def _start_project_watcher(folder_path):
+        nonlocal _project_observer
+        _stop_project_watcher()
+        import os as _os
+        try:
+            from watchdog.observers import Observer
+            from watchdog.events import FileSystemEventHandler
+
+            class _Handler(FileSystemEventHandler):
+                def __init__(self):
+                    import time as _time
+                    self._last_push = 0
+                def on_created(self, e):
+                    self._push(e)
+                def on_deleted(self, e):
+                    self._push(e)
+                def on_moved(self, e):
+                    if e.dest_path:
+                        self._push(e)
+                def _push(self, event):
+                    import time as _time
+                    now = _time.time()
+                    # 去抖：2000ms 内不重复推送（防止系统进程在读取文件时触发 on_modified）
+                    if now - self._last_push < 2.0:
+                        return
+                    self._last_push = now
+                    src = event.src_path.replace("\\", "/")
+                    name = _os.path.basename(src)
+                    if name.startswith(".") or name.endswith((".tmp", ".swp")):
+                        return
+                    _broadcast.push_event("project.file_changed", {"path": src})
+
+            _project_observer = Observer()
+            _project_observer.schedule(_Handler(), _os.path.normpath(folder_path), recursive=True)
+            _project_observer.start()
+            print(f"[ProjectWatcher] watchdog 已启动：{folder_path}")
+        except ImportError:
+            print("[ProjectWatcher] watchdog 未安装")
+        except Exception as exc:
+            print(f"[ProjectWatcher] 启动失败: {exc}")
+
     def _fs_select_folder(rid, params):
         import tkinter as _tk
         from tkinter import filedialog as _fd
@@ -382,6 +438,7 @@ def register(gw):
                     _write_project_cache(str(p), tree or [])
                 except Exception:
                     pass
+                _start_project_watcher(str(p))
                 return gw._ok(rid, {"path": str(p), "name": p.name})
             return gw._ok(rid, {"path": None, "cancelled": True})
         except Exception as e:

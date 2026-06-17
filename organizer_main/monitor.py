@@ -159,32 +159,27 @@ class WatchdogMonitor(BaseMonitor):
         try:
             from watchdog.observers import Observer
             from watchdog.events import FileSystemEventHandler
-            
+
             class EventHandler(FileSystemEventHandler):
                 def __init__(self, outer):
                     self.outer = outer
-                
+
                 def on_created(self, event):
                     if not event.is_directory and not event.src_path.endswith('.tmp'):
                         self.outer._emit_event(event.src_path, 'created')
-                
-                def on_modified(self, event):
-                    if not event.is_directory and not event.src_path.endswith('.tmp'):
-                        self.outer._emit_event(event.src_path, 'modified')
-                
+
                 def on_deleted(self, event):
                     if not event.is_directory:
                         self.outer._emit_event(event.src_path, 'deleted')
-            
+
             self._observer = Observer()
             handler = EventHandler(self)
-            self._observer.schedule(handler, str(self.watch_path), recursive=False)
+            self._observer.schedule(handler, str(self.watch_path), recursive=True)
             self._observer.start()
             print(f"[Monitor] Watchdog 实时监控已启动：{self.watch_path}")
-            
-        except ImportError:
-            print("[Monitor] watchdog 未安装，回退到轮询模式")
-            # 回退到轮询
+
+        except Exception:
+            print("[Monitor] Watchdog 不可用，回退到轮询")
             self._poll_fallback = PollingMonitor(
                 str(self.watch_path),
                 self.debounce_seconds,

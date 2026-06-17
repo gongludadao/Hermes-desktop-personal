@@ -1,6 +1,7 @@
 // ── File Manager Module ──
     var projectTabs = [];  // [{path, name, expandedPaths, scrollPos}]
     var activeTabIndex = -1;
+    var wsContextSource = 'project';  // 'project' 或 'obsidian'，右键菜单来源
 
     function _getProjectIndex(path) {
       for (var i = 0; i < projectTabs.length; i++) {
@@ -80,22 +81,36 @@
     }
 
     function _expandPaths(paths) {
+      if (!paths || paths.length === 0) return;
       var idx = 0;
       function expandNext() {
         if (idx >= paths.length) return;
         var targetPath = paths[idx++];
         var row = _findRowByPath(targetPath);
-        if (row) {
-          var entry = _treeContainers[targetPath];
-          if (entry && entry.container.style.display === 'none') {
-            row.click();
-            if (entry.container.children.length === 0) {
-              setTimeout(expandNext, 100);
-              return;
-            }
-          }
+        var entry = _treeContainers[targetPath];
+        if (!row || !entry || entry.container.style.display !== 'none') {
+          expandNext();
+          return;
         }
-        expandNext();
+        // 直接展开，不经过 onclick 处理器（避免 "加载中..." 闪烁）
+        entry.container.style.display = 'block';
+        var iconSpan = row.querySelector('span');
+        if (iconSpan) iconSpan.textContent = '\ud83d\udcc2';
+        if (entry.container.children.length === 0) {
+          // 静默加载：用临时容器建好子树再一次性移入
+          var lid = String(++msgId);
+          _rpcCallbacks[lid] = function(result) {
+             if (!result.error) {
+               var tc = document.createElement('div');
+               renderTree(result.items || [], tc, targetPath, entry.depth);
+               entry.container.replaceChildren.apply(entry.container, tc.children);
+             }
+             expandNext();
+          };
+          ws.send(JSON.stringify({ jsonrpc: '2.0', id: lid, method: 'fs.list_dir', params: { path: targetPath } }));
+        } else {
+          expandNext();
+        }
       }
       expandNext();
     }
@@ -178,6 +193,7 @@
       e.stopPropagation();
       wsContextFile = null;
       wsContextDir = projectRoot;
+      wsContextSource = 'project';
       if (wsPathTip) { wsPathTip.textContent = projectRoot; wsPathTip.title = projectRoot; }
       var x = Math.min(e.clientX, window.innerWidth - 145);
       var y = Math.min(e.clientY, window.innerHeight - 120);
@@ -346,7 +362,8 @@
       expandNextDir();
     }
 
-    function loadDir(dirPath, container, depth, callback) {
+    function loadDir(dirPath, container, depth, callback, rpcMethod, ctn) {
+      rpcMethod = rpcMethod || 'fs.list_dir';
       depth = depth || 0;
       var lid = String(++msgId);
       container.innerHTML = '<div style="padding:8px 14px;color:var(--hdc-fg-dim)">\u52a0\u8f7d\u4e2d...</div>';
@@ -356,14 +373,16 @@
           if (callback) callback();
           return;
         }
-        renderTree(result.items || [], container, dirPath, depth);
+        renderTree(result.items || [], container, dirPath, depth, ctn, rpcMethod);
         if (callback) callback();
       };
-      ws.send(JSON.stringify({ jsonrpc: '2.0', id: lid, method: 'fs.list_dir', params: { path: dirPath } }));
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id: lid, method: rpcMethod, params: { path: dirPath } }));
     }
 
-    function renderTree(items, container, parentPath, depth) {
+    function renderTree(items, container, parentPath, depth, _ctn, _rpc) {
       depth = depth || 0;
+      _ctn = _ctn || _treeContainers;
+      _rpc = _rpc || 'fs.list_dir';
       container.innerHTML = '';
       for (var i = 0; i < items.length; i++) {
         var item = items[i];
@@ -400,6 +419,7 @@
             e.stopPropagation();
             wsContextFile = path;
             wsContextDir = isDir ? path : _dirOf(path);
+            wsContextSource = (_ctn === _treeContainers) ? 'project' : 'obsidian';
             if (wsPathTip) { wsPathTip.textContent = wsContextDir; wsPathTip.title = wsContextDir; }
             var x = Math.min(e.clientX, window.innerWidth - 145);
             var y = Math.min(e.clientY, window.innerHeight - 120);
@@ -411,7 +431,7 @@
             var expanded = false;
             var childContainer = document.createElement('div');
             childContainer.style.display = 'none';
-            _treeContainers[path] = { container: childContainer, depth: depth + 1 };
+            _ctn[path] = { container: childContainer, depth: depth + 1 };
             el.ondragover = function(e) {
               e.preventDefault();
               e.dataTransfer.dropEffect = 'move';
@@ -435,7 +455,7 @@
               var fid = String(++msgId);
               _rpcCallbacks[fid] = function(result) {
                 if (result.error) { addMsg('\u79fb\u52a8\u5931\u8d25: ' + result.error.message, 'err'); return; }
-                refreshTree();
+                refreshAllTrees();
               };
               ws.send(JSON.stringify({ jsonrpc: '2.0', id: fid, method: 'fs.move', params: { src: srcPath, dst: dstPath } }));
             };
@@ -453,7 +473,7 @@
                 childContainer.style.display = 'block';
                 iconEl.textContent = '\ud83d\udcc2';
                 if (childContainer.children.length === 0) {
-                  loadDir(path, childContainer, depth + 1);
+                  loadDir(path, childContainer, depth + 1, null, _rpc);
                 }
               } else {
                 childContainer.style.display = 'none';
@@ -496,6 +516,7 @@
                     }
                   });
                 }
+                refreshAllTrees();
               };
               ws.send(JSON.stringify({ jsonrpc: '2.0', id: fid, method: 'fs.move', params: { src: srcPath, dst: dstPath } }));
             };
@@ -558,18 +579,50 @@
       }
     }
 
+    var _refreshPending = false;
+
     function refreshTree() {
+      if (!projectRoot) {
+        console.log('[Project] projectRoot is null, cannot refresh');
+        return;
+      }
+      if (_refreshPending) {
+        console.log('[Project] refresh already pending, skip');
+        return;
+      }
+      _refreshPending = true;
+      // 直接从 _treeContainers 捕获当前展开状态
       var expandedPaths = [];
       for (var p in _treeContainers) {
         if (_treeContainers[p].container && _treeContainers[p].container.style.display !== 'none') {
           expandedPaths.push(p);
         }
       }
-      wsTree.innerHTML = '';
-      _treeContainers = {};
-      loadDir(projectRoot, wsTree, 0, function() {
+      console.log('[Project] refreshTree captured ' + expandedPaths.length + ' expanded paths');
+      // 先用临时容器建好新树，再一次性替换到 wsTree，避免闪烁
+      var lid = String(++msgId);
+      _rpcCallbacks[lid] = function(result) {
+        _refreshPending = false;
+        if (result.error) {
+          console.log('[Project] refreshTree error:', result.error.message);
+          return;
+        }
+        var tempDiv = document.createElement('div');
+        _treeContainers = {};
+        renderTree(result.items || [], tempDiv, projectRoot, 0);
+        // 用 replaceChildren 一次性替换，避免清除→填充之间的空白
+        wsTree.replaceChildren.apply(wsTree, tempDiv.children);
         _expandPaths(expandedPaths);
-      });
+      };
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id: lid, method: 'fs.list_dir', params: { path: projectRoot } }));
+    }
+    window.refreshProjectTree = refreshTree;
+
+    function refreshAllTrees() {
+      refreshTree();
+      if (typeof window._refreshVaultTree === 'function') {
+        window._refreshVaultTree();
+      }
     }
 
     function promptNewFile(parentDir) {
@@ -580,7 +633,7 @@
         fp = fp.replace(/\//g, '\\');
         _rpcCallbacks[fid] = function(result) {
           if (result.error) { addMsg('\u65b0\u5efa\u6587\u4ef6\u5931\u8d25: ' + result.error.message, 'err'); return; }
-          refreshTree();
+          refreshAllTrees();
         };
         ws.send(JSON.stringify({ jsonrpc: '2.0', id: fid, method: 'fs.create_file', params: { path: fp } }));
       });
@@ -594,7 +647,7 @@
         fp = fp.replace(/\//g, '\\');
         _rpcCallbacks[fid] = function(result) {
           if (result.error) { addMsg('\u65b0\u5efa\u6587\u4ef6\u5939\u5931\u8d25: ' + result.error.message, 'err'); return; }
-          refreshTree();
+          refreshAllTrees();
         };
         ws.send(JSON.stringify({ jsonrpc: '2.0', id: fid, method: 'fs.create_folder', params: { path: fp } }));
       });
@@ -611,7 +664,7 @@
             var nameParts = result.path.split(/[\\/]/);
             updatePreviewMeta({ filePath: result.path, title: nameParts[nameParts.length - 1] });
           }
-          refreshTree();
+          refreshAllTrees();
         };
         ws.send(JSON.stringify({ jsonrpc: '2.0', id: fid, method: 'fs.rename', params: { path: filePath, new_name: newName } }));
       });
@@ -631,7 +684,7 @@
           if (wsContextDir === filePath || (wsContextDir && filePath.indexOf(wsContextDir) === 0)) {
             wsContextDir = _dirOf(filePath) || projectRoot;
           }
-          refreshTree();
+          refreshAllTrees();
         };
         ws.send(JSON.stringify({ jsonrpc: '2.0', id: fid, method: 'fs.delete', params: { path: filePath } }));
       });

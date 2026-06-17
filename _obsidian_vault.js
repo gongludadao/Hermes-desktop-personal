@@ -3,98 +3,9 @@
     var obsTreeContainers = {};
     var obsRoot = null;
     var obsOpen = true;
-    
-    // Obsidian Vault 专用右键菜单
-    var obsContextMenu = null;
     var _embeddingApiKey = '';
     var _embeddingBaseUrl = '';
     var _embeddingModel = 'text-embedding-3-small';
-
-    function renderObsFileItems(items, container, parentPath, depth) {
-      depth = depth || 0;
-      container.innerHTML = '';
-      for (var i = 0; i < items.length; i++) {
-        var item = items[i];
-        var pad = 8 + depth * 14;
-        var row = document.createElement('div');
-        row.setAttribute('data-path', item.path);
-        row.style.cssText = 'padding:3px 8px 3px ' + pad + 'px;cursor:pointer;display:flex;align-items:center;gap:4px;color:var(--hdc-fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px;line-height:1.5';
-        row.onmouseenter = function() { if (!this._selected) this.style.background = 'var(--hdc-muted)'; };
-        row.onmouseleave = function() { if (!this._selected) this.style.background = 'transparent'; };
-
-        var icon = item.is_dir ? '\ud83d\udcc1' : '\ud83d\udcc4';
-        var iconSpan = document.createElement('span');
-        iconSpan.textContent = icon;
-        iconSpan.style.cssText = 'flex-shrink:0;font-size:13px;pointer-events:none';
-        row.appendChild(iconSpan);
-
-        var nameSpan = document.createElement('span');
-        nameSpan.textContent = item.name;
-        nameSpan.style.cssText = 'overflow:hidden;text-overflow:ellipsis;pointer-events:none';
-        row.appendChild(nameSpan);
-
-        (function(path, name, isDir, el, iconEl) {
-          el.oncontextmenu = function(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            wsContextFile = path;
-            wsContextDir = isDir ? path : _dirOf(path);
-            if (wsPathTip) { wsPathTip.textContent = wsContextDir; wsPathTip.title = wsContextDir; }
-            var x = Math.min(e.clientX, window.innerWidth - 145);
-            var y = Math.min(e.clientY, window.innerHeight - 120);
-            wsContextMenu.style.left = x + 'px';
-            wsContextMenu.style.top = y + 'px';
-            wsContextMenu.style.display = '';
-          };
-          if (isDir) {
-            var expanded = false;
-            var childContainer = document.createElement('div');
-            childContainer.style.display = 'none';
-            obsTreeContainers[path] = { container: childContainer, depth: depth + 1 };
-            el.onclick = function(e) {
-              e.stopPropagation();
-              wsContextDir = path;
-              if (wsPathTip) { wsPathTip.textContent = path; wsPathTip.title = path; }
-              expanded = !expanded;
-              if (expanded) {
-                childContainer.style.display = 'block';
-                iconEl.textContent = '\ud83d\udcc2';
-                if (childContainer.children.length === 0) {
-                  loadObsDir(path, childContainer, depth + 1);
-                }
-              } else {
-                childContainer.style.display = 'none';
-                iconEl.textContent = '\ud83d\udcc1';
-              }
-            };
-            container.appendChild(el);
-            container.appendChild(childContainer);
-          } else {
-            el.onclick = function(e) {
-              e.stopPropagation();
-              openObsNote(path, name);
-            };
-            container.appendChild(el);
-          }
-        })(item.path, item.name, item.is_dir, row, iconSpan);
-      }
-    }
-
-    function loadObsDir(dirPath, container, depth, callback) {
-      depth = depth || 0;
-      var lid = String(++msgId);
-      container.innerHTML = '<div style="padding:8px 14px;color:var(--hdc-fg-dim)">加载中...</div>';
-      _rpcCallbacks[lid] = function(result) {
-        if (result.error) {
-          container.innerHTML = '<div style="padding:8px 14px;color:#f66">错误: ' + result.error.message + '</div>';
-          if (callback) callback();
-          return;
-        }
-        renderObsFileItems(result.items || [], container, dirPath, depth);
-        if (callback) callback();
-      };
-      ws.send(JSON.stringify({ jsonrpc: '2.0', id: lid, method: 'obsidian.list_files', params: { path: dirPath } }));
-    }
 
     function openObsNote(fp, name) {
       // 复用项目模块的 openFile，直接用 fs.read_file 读取
@@ -142,7 +53,9 @@
             console.log('[ObsVault] 向量索引构建结果:', success);
           });
         }
-        loadObsDir(obsRoot, wsObsTree, 0);
+        // 使用统一的 renderTree + loadDir，带自定义 containers 和 RPC 方法
+        obsTreeContainers = {};
+        loadDir(obsRoot, wsObsTree, 0, null, 'obsidian.list_files', obsTreeContainers);
       };
       console.log('[ObsVault] sending obsidian.get_active request');
       ws.send(JSON.stringify({ jsonrpc: '2.0', id: fid, method: 'obsidian.get_active' }));
@@ -180,6 +93,33 @@
           selectObsVault();
         };
       }
+      if (wsObsRefresh) {
+        wsObsRefresh.onclick = function(e) {
+          e.stopPropagation();
+          if (obsRoot && wsObsTree) {
+            _refreshVaultTree();
+            console.log('[ObsVault] 手动刷新');
+          }
+        };
+      }
+      // Obsidian 树空白区域右键菜单 → 使用统一的 wsContextMenu
+      if (wsObsTree) {
+        wsObsTree.oncontextmenu = function(e) {
+          // 如果点击的是文件/文件夹行，不处理（由行自己处理）
+          if (e.target.closest('[data-path]')) return;
+          e.preventDefault();
+          e.stopPropagation();
+          wsContextFile = null;
+          wsContextDir = obsRoot;
+          wsContextSource = 'obsidian';
+          if (wsPathTip) { wsPathTip.textContent = obsRoot; wsPathTip.title = obsRoot; }
+          var x = Math.min(e.clientX, window.innerWidth - 145);
+          var y = Math.min(e.clientY, window.innerHeight - 120);
+          wsContextMenu.style.left = x + 'px';
+          wsContextMenu.style.top = y + 'px';
+          wsContextMenu.style.display = '';
+        };
+      }
       // 不在这里自动激活，等 WebSocket 连接后再激活
     }
     
@@ -194,42 +134,63 @@
       }
     }
     
-    // 定期检查 vault 路径是否变化（每5秒检查一次）
-    var _vaultCheckTimer = null;
-    function startVaultPathMonitor() {
-      if (_vaultCheckTimer) return; // 已经启动了
-      _vaultCheckTimer = setInterval(function() {
-        if (!ws || ws.readyState !== WebSocket.OPEN) return;
-        var fid = String(++msgId);
-        _rpcCallbacks[fid] = function(result) {
-          if (result.error || !result.path) return;
-          var newPath = result.path;
-          var oldPath = window._obsidianVaultPath || localStorage.getItem('hdc_obsidian_vault');
-          if (newPath !== oldPath) {
-            console.log('[ObsVault] vault path changed:', oldPath, '->', newPath);
-            // 更新全局变量和 localStorage
-            window._obsidianVaultPath = newPath;
-            try { localStorage.setItem('hdc_obsidian_vault', newPath); } catch(e) {}
-            // 更新状态栏显示
-            if (typeof statusEl !== 'undefined' && statusEl) {
-              var kbStatus = window._autoKbEnabled ? ('[AutoKB] vault: ' + newPath) : '';
-              statusEl.textContent = '就绪' + (kbStatus ? ' | ' + kbStatus : '');
-            }
-            // 重新加载 vault 目录
-            if (wsObsTree) {
-              wsObsTree.innerHTML = '';
-              loadObsDir(newPath, wsObsTree, 0);
-            }
+    // ── 文件变更检测 ────────────────────────────────────────────────
+    // 后端 watchdog 检测到变化后，通过 WebSocket 推送通知。收到通知就刷新。
+    function _refreshVaultTree() {
+      if (!obsRoot || !wsObsTree) return;
+      // 保存当前展开的路径
+      var expandedPaths = [];
+      for (var p in obsTreeContainers) {
+        if (obsTreeContainers[p].container && obsTreeContainers[p].container.style.display !== 'none') {
+          expandedPaths.push(p);
+        }
+      }
+      var tempDiv = document.createElement('div');
+      obsTreeContainers = {};
+      var lid = String(++msgId);
+      _rpcCallbacks[lid] = function(result) {
+        if (result.error) return;
+        renderTree(result.items || [], tempDiv, obsRoot, 0, obsTreeContainers, 'obsidian.list_files');
+        wsObsTree.replaceChildren.apply(wsObsTree, tempDiv.children);
+        // 恢复展开状态（用离线加载避免闪烁）
+        var idx = 0;
+        function _findObsRow(p) {
+          var all = wsObsTree.querySelectorAll('[data-path]');
+          for (var i = 0; i < all.length; i++) {
+            if (all[i].getAttribute('data-path') === p) return all[i];
           }
-        };
-        ws.send(JSON.stringify({ jsonrpc: '2.0', id: fid, method: 'obsidian.get_active' }));
-      }, 5000);
-      console.log('[ObsVault] vault path monitor started');
+          return null;
+        }
+        function expandNext() {
+          if (idx >= expandedPaths.length) return;
+          var tp = expandedPaths[idx++];
+          var row = _findObsRow(tp);
+          var entry = obsTreeContainers[tp];
+          if (!row || !entry || entry.container.style.display !== 'none') { expandNext(); return; }
+          entry.container.style.display = 'block';
+          var iconSpan = row.querySelector('span');
+          if (iconSpan) iconSpan.textContent = '\ud83d\udcc2';
+          if (entry.container.children.length === 0) {
+            var sid = String(++msgId);
+            _rpcCallbacks[sid] = function(r2) {
+              if (!r2.error) {
+                var tc = document.createElement('div');
+                renderTree(r2.items || [], tc, tp, entry.depth, obsTreeContainers, 'obsidian.list_files');
+                entry.container.replaceChildren.apply(entry.container, tc.children);
+              }
+              expandNext();
+            };
+            ws.send(JSON.stringify({ jsonrpc: '2.0', id: sid, method: 'obsidian.list_files', params: { path: tp } }));
+          } else {
+            expandNext();
+          }
+        }
+        expandNext();
+      };
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id: lid, method: 'obsidian.list_files', params: { path: obsRoot } }));
     }
     
     // 导出到全局，供 _chat_overlay.js 的 ws.onopen 调用
     window.autoActivateObsVault = autoActivateObsVault;
-    window.startVaultPathMonitor = startVaultPathMonitor;
-    console.log('[ObsVault] autoActivateObsVault exported to window');
-    
-    // 导出到全局
+    window._refreshVaultTree = _refreshVaultTree;
+    console.log('[ObsVault] autoActivateObsVault / _refreshVaultTree exported to window');
