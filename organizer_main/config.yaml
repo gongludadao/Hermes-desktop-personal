@@ -1,0 +1,46 @@
+# Wiki Main 文件夹智能处理配置
+
+# 监控配置
+monitoring:
+  enabled: true
+  watch_path: "C:/Users/13213/.openclaw/wiki/main"
+  debounce_seconds: 5.0  # 防抖：同一文件 5 秒内只触发一次
+  poll_interval: 10.0    # 轮询间隔（watchdog 不可用时）
+
+# AI 配置
+ai:
+  # 会话 ID（独立会话，不会和用户聊天冲突）
+  session_id: "wiki-main-processor"
+  max_iterations: 1       # 单轮对话（AI 自己调用工具）
+  skip_context_files: true
+  skip_memory: true
+  timeout_seconds: 60     # 等待 AI 完成超时
+  
+  # 模型配置（请根据你的 Hermes 配置修改）
+  base_url: "http://localhost:3000/v1"  # Hermes API 地址
+  provider: "ollama"                   # 或 "openai", "anthropic" 等
+  model: "deepseek-r1:1.5b"            # 你使用的模型名称
+
+# 处理配置
+processing:
+  max_file_size: 50000    # 最大文件大小（字符），超过则截取前 50000 字符
+  supported_extensions:
+    - ".md"
+    - ".txt"
+    - ".json"
+    - ".py"
+    - ".js"
+    - ".ts"
+    - ".html"
+    - ".css"
+    - ".yaml"
+    - ".yml"
+    - ".xml"
+    - ".csv"
+    - ".log"
+    - ".ini"
+    - ".cfg"
+    - ".conf"
+    - ".sh"
+    - ".bat"
+    - ".ps1"
