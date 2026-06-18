@@ -6,6 +6,7 @@
     var _embeddingApiKey = '';
     var _embeddingBaseUrl = '';
     var _embeddingModel = 'text-embedding-3-small';
+    var _vaultTreeRefreshPending = false; // 防止并发刷新
 
     function openObsNote(fp, name) {
       // 复用项目模块的 openFile，直接用 fs.read_file 读取
@@ -138,6 +139,11 @@
     // 后端 watchdog 检测到变化后，通过 WebSocket 推送通知。收到通知就刷新。
     function _refreshVaultTree() {
       if (!obsRoot || !wsObsTree) return;
+      if (_vaultTreeRefreshPending) {
+        console.log('[ObsVault] refresh already pending, skip');
+        return;
+      }
+      _vaultTreeRefreshPending = true;
       // 保存当前展开的路径
       var expandedPaths = [];
       for (var p in obsTreeContainers) {
@@ -150,6 +156,7 @@
       obsTreeContainers = {};
       var lid = String(++msgId);
       _rpcCallbacks[lid] = function(result) {
+        _vaultTreeRefreshPending = false;
         if (result.error) return;
         renderTree(result.items || [], tempDiv, obsRoot, 0, obsTreeContainers, 'obsidian.list_files');
         wsObsTree.replaceChildren.apply(wsObsTree, tempDiv.children);
