@@ -158,11 +158,12 @@
     s = s.replace(/^# (.+)$/gm, '<h2 style="margin:16px 0 8px;font-size:18px;font-weight:600;line-height:1.5">$1</h2>');
 
     // 待办事项（Obsidian 风格）
-    s = s.replace(/^\s*-\s+\[([ xX])\]\s+(.+)$/gm, function(_, done, text) {
+    s = s.replace(/^(\s*)-\s+\[([ xX])\]\s+(.+)$/gm, function(_, indent, done, text) {
       var checked = done === 'x' || done === 'X';
       var checkbox = '<span style="display:inline-block;width:14px;height:14px;border:1px solid var(--hdc-border);border-radius:3px;margin-right:6px;vertical-align:middle;text-align:center;line-height:12px;font-size:10px;' + (checked ? 'background:var(--hdc-accent);color:#fff' : 'background:transparent') + '">' + (checked ? '✓' : '') + '</span>';
       var style = checked ? 'text-decoration:line-through;opacity:0.6' : '';
-      return '<li style="list-style:none;margin-left:-16px;' + style + '">' + checkbox + text + '</li>';
+      // 保留原始缩进，复选框紧跟在 [ ] 的位置
+      return indent + checkbox + '<span style="' + style + '">' + text + '</span>';
     });
     s = s.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
     s = s.replace(/^[-*] (.+)$/gm, '<li>$1</li>');
