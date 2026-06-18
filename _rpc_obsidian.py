@@ -53,16 +53,13 @@ class _VaultWatcher:
                 def _push_path(self, path: str, event_type: str = "unknown"):
                     """统一推送 vault_changed 事件（带去抖和临时文件过滤）"""
                     if not self._debounce():
-                        print(f"[ObsVault] DEB: 忽略 {event_type} {path}（去抖中）")
                         return
                     src = path.replace("\\", "/")
                     name = os.path.basename(src)
                     if name.startswith(".") or name.endswith((".tmp", ".swp")):
-                        print(f"[ObsVault] SKIP: 跳过临时文件 {event_type} {src}")
                         return
                     with self.watcher._lock:
                         self.watcher._version += 1
-                    print(f"[ObsVault] PUSH: {event_type} → v{self.watcher._version} src_path={src}")
                     _broadcast.push_event("obsidian.vault_changed", {"version": self.watcher._version, "src_path": src})
                 def on_created(self, e):
                     self._push_path(e.src_path, "created")
@@ -72,16 +69,13 @@ class _VaultWatcher:
                     # 原子写入（Obsidian）：写临时文件 → 重命名为目标文件
                     # 此时 src_path 是临时文件，dest_path 才是真正的文件
                     if e.dest_path:
-                        print(f"[ObsVault] MOVE: src={e.src_path} → dest={e.dest_path}")
                         self._push_path(e.dest_path, "moved")
                 def on_modified(self, e):
-                    print(f"[ObsVault] MODIFY: {e.src_path}")
                     self._push_path(e.src_path, "modified")
 
             self._observer = Observer()
             self._observer.schedule(_Handler(self), native_path, recursive=True)
             self._observer.start()
-            print(f"[ObsVault] watchdog 监控已启动：{native_path}")
 
         except ImportError:
             print("[ObsVault] watchdog 未安装，无法监控")
@@ -228,7 +222,6 @@ def register(gw):
 
     def _obsidian_get_vault_version(rid, params):
         ver = _vault_watcher.version
-        print(f"[ObsVault] 查询版本号: {ver}, watch_path={_vault_watcher._watch_path}")
         return gw._ok(rid, {"version": ver})
 
     gw._methods["obsidian.get_active"] = _obsidian_get_active
@@ -281,20 +274,13 @@ def register(gw):
             if _re.match(r"^-{3,}\s*$", stripped):
                 # 跳过文件首行的 ---（Obsidian frontmatter 开始标记）
                 if i == 1:
-                    print(f"[TodoScan] 跳过首行分隔线(行1, frontmatter)")
                     continue
                 in_section = not in_section
                 if in_section:
                     section_enter_at = i
-                    print(f"[TodoScan] 进入区域: 行{i}")
-                else:
-                    print(f"[TodoScan] 离开区域: 行{i} (区域从行{section_enter_at}到行{i})")
                 continue
             if not in_section:
                 continue
-            # 调试：打印区域内非待办行
-            if not _re.match(r"^\s*-\s+\[([ xX])\]", line) and line.strip():
-                print(f"[TodoScan] 区域内非待办 行{i}: {line.rstrip()}")
             m = _re.match(r"^\s*-\s+\[([ xX])\]\s+(.+)$", line)
             if m:
                 done = m.group(1) in ("x", "X")
@@ -306,7 +292,6 @@ def register(gw):
                     "text": text,
                     "done": done,
                 })
-                print(f"[TodoScan] 匹配待办 行{i}: {line.rstrip()} → text={text!r}")
         return gw._ok(rid, {"todos": todos, "todo_relpath": rel_path})
 
     def _obsidian_toggle_todo(rid, params):
