@@ -404,12 +404,10 @@
         '<span style="font-size:12px;color:var(--hdc-fg)">\u8bb0\u4e8b\u672c</span>' +
         '<span id="hdc-ws-note-count" style="font-size:10px;color:var(--hdc-fg-dim)"></span>' +
         '<span style="flex:1"></span>' +
-        '<button id="hdc-ws-note-add" title="\u65b0\u5efa" style="background:transparent;border:1px solid var(--hdc-border);border-radius:3px;padding:2px 6px;color:var(--hdc-fg-dim);font-size:10px;cursor:pointer">+</button>' +
         '<button id="hdc-ws-note-refresh" title="\u5237\u65b0" style="background:transparent;border:1px solid var(--hdc-border);border-radius:3px;padding:2px 6px;color:var(--hdc-fg-dim);font-size:10px;cursor:pointer">\u21bb</button>' +
       '</div>' +
       '<div id="hdc-ws-note-body" style="display:none;flex-direction:column;overflow:hidden">' +
         '<div id="hdc-ws-note-list" style="overflow-y:auto;flex:1;padding:2px 4px;font-size:11px;min-height:40px;max-height:200px">' +
-          '<div style="padding:20px 8px;text-align:center;color:var(--hdc-fg-dim);font-size:11px">\u70b9\u51fb + \u65b0\u5efa\u7b14\u8bb0</div>' +
         '</div>' +
       '</div>' +
       '<div id="hdc-ws-clip-header" style="padding:6px 8px;border-bottom:1px solid var(--hdc-border);border-top:1px solid var(--hdc-border);display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;flex-shrink:0;background:var(--hdc-card)">'+
@@ -484,9 +482,10 @@
         '<div data-action="copy-path" class="hdc-menu-item-dim" style="padding:6px 16px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'">\ud83d\udccb \u590d\u5236\u8def\u5f84</div>' +
       '</div>' +
       '<div id="hdc-ws-note-context-menu" style="display:none;position:fixed;background:var(--hdc-card);border:1px solid var(--hdc-border);border-radius:8px;padding:4px 0;z-index:10001;min-width:140px;box-shadow:0 4px 12px rgba(0,0,0,0.35)">' +
+        '<div data-action="note-new-file" class="hdc-menu-item" style="padding:6px 16px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'">\ud83d\udcdd \u65b0\u5efa\u7b14\u8bb0</div>' +
         createSendAIContextMenuOption('note-send-ai') +
         '<div data-action="note-rename" class="hdc-menu-item" style="padding:6px 16px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'">\u270f \u91cd\u547d\u540d</div>' +
-        '<div data-action="note-delete" class="hdc-menu-item-red" style="padding:6px 16px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'">\u2715 \u5220\u9664</div>' +
+        '<div data-action="note-delete" class="hdc-menu-item-red" style="padding:6px 16px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'\">\u2715 \u5220\u9664</div>' +
       '</div>' +
       '<div id="hdc-ws-clip-context-menu" style="display:none;position:fixed;background:var(--hdc-card);border:1px solid var(--hdc-border);border-radius:8px;padding:4px 0;z-index:10001;min-width:140px;box-shadow:0 4px 12px rgba(0,0,0,0.35)">' +
         '<div data-action="clip-select" class="hdc-menu-item" style="padding:6px 16px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'">\u2611 \u591a\u9009</div>' +
@@ -530,7 +529,7 @@
       'ws-project-tabs', 'ws-project-body', 'ws-project-arrow', 'ws-project-name',
       'ws-path-tip', 'ws-switch-project', 'ws-context-menu',
       'ws-note-header', 'ws-note-body', 'ws-note-arrow', 'ws-note-list',
-      'ws-note-count', 'ws-note-add', 'ws-note-refresh',
+      'ws-note-count', 'ws-note-refresh',
       'ws-clip-header', 'ws-clip-body', 'ws-clip-arrow', 'ws-clip-list',
       'ws-clip-count', 'ws-clip-refresh', 'ws-note-context-menu', 'ws-clip-context-menu',
       'ws-stock-header', 'ws-stock-body', 'ws-stock-arrow', 'ws-stock-input',
@@ -574,7 +573,6 @@
     var wsNoteArrow = ui['ws-note-arrow'];
     var wsNoteList = ui['ws-note-list'];
     var wsNoteCount = ui['ws-note-count'];
-    var wsNoteAdd = ui['ws-note-add'];
     var wsNoteRefresh = ui['ws-note-refresh'];
     var wsClipHeader = ui['ws-clip-header'];
     var wsClipBody = ui['ws-clip-body'];
