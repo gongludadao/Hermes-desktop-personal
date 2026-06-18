@@ -94,15 +94,6 @@
           selectObsVault();
         };
       }
-      if (wsObsRefresh) {
-        wsObsRefresh.onclick = function(e) {
-          e.stopPropagation();
-          if (obsRoot && wsObsTree) {
-            _refreshVaultTree();
-            console.log('[ObsVault] 手动刷新');
-          }
-        };
-      }
       // Obsidian 树空白区域右键菜单 → 使用统一的 wsContextMenu
       if (wsObsTree) {
         wsObsTree.oncontextmenu = function(e) {
