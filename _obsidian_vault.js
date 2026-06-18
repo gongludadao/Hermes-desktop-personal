@@ -2,7 +2,7 @@
     var _obsVaultActive = false;
     var obsTreeContainers = {};
     var obsRoot = null;
-    var obsOpen = true;
+    var obsOpen = false;
     var _embeddingApiKey = '';
     var _embeddingBaseUrl = '';
     var _embeddingModel = 'text-embedding-3-small';
@@ -24,7 +24,7 @@
     function activateObsVault() {
       console.log('[ObsVault] activateObsVault called');
       wsObsHeader.style.display = 'flex';
-      toggleSection(wsObsBody, wsObsArrow);
+      wsObsBody.style.display = 'none';
       wsObsTree.innerHTML = '<div style="padding:20px 8px;text-align:center;color:var(--hdc-fg-dim);font-size:11px">[ObsVault] 正在获取 vault 路径...</div>';
       var fid = String(++msgId);
       _rpcCallbacks[fid] = function(result) {

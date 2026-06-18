@@ -497,6 +497,14 @@
       // ✅ 如果已有标签，切换到该标签
       if (existingTab) {
         _switchToTab(existingTab.id);
+        // 执行 onLoaded 回调（用于行跳转等高亮场景）
+        if (rpc && rpc.onLoaded) {
+          rpc.onLoaded({
+            content: existingTab.content,
+            type: existingTab.type,
+            filePath: existingTab.filePath
+          });
+        }
         return;
       }
 
@@ -917,7 +925,7 @@
       renderPreview(currentFileContent, ext || 'md', currentFilePath);
     }
 
-    function openFile(path, name) {
+    function openFile(path, name, line) {
       var ext = getFileExt(name);
       openPreview({
         title: name + ' 加载中...',
@@ -962,9 +970,88 @@
             var isBinary = result.content_type === 'pdf' || result.content_type === 'audio' || result.content_type === 'video' || result.content_type === 'image';
             var previewExt = isBinary ? ext : resultType;
             return { title: name, content: result.content, type: previewExt, filePath: result.path, editable: !isBinary };
-          }
+          },
+          onLoaded: line ? function() {
+            setTimeout(function() { _scrollToLineInPreview(line); }, 150);
+          } : null
         }
       });
+    }
+
+    function _scrollToLineInPreview(line) {
+      if (!editorTextarea || !editorTextarea.value) {
+        setTimeout(function() { _scrollToLineInPreview(line); }, 500);
+        return;
+      }
+      var lines = editorTextarea.value.split('\n');
+      if (line < 1 || line > lines.length) return;
+      var targetText = lines[line - 1].trim();
+      if (!targetText) return;
+      var targetClean = targetText.replace(/^\s*-\s+\[[ xX]?\]\s*/, '').trim();
+
+      var targetEl = _deepFindTodoInPreview(targetClean || targetText);
+      if (targetEl) {
+        _highlightAndScroll(targetEl);
+        return;
+      }
+
+      // 兜底: 按比例滚动到行号对应位置
+      if (editorPreview) {
+        var ratio = (line - 1) / lines.length;
+        editorPreview.scrollTop = ratio * (editorPreview.scrollHeight - editorPreview.clientHeight);
+        // 再尝试以递增延迟重试（预览渲染可能还没完成）
+        var retries = [800, 1500, 3000];
+        for (var ri = 0; ri < retries.length; ri++) {
+          (function(delay) {
+            setTimeout(function() {
+              var el = _deepFindTodoInPreview(targetClean || targetText);
+              if (el) _highlightAndScroll(el);
+            }, delay);
+          })(retries[ri]);
+        }
+      }
+    }
+
+    function _deepFindTodoInPreview(text) {
+      if (!text || !editorPreview) return null;
+      // 去掉 markdown 标记符号，与 renderMarkdown 的处理保持一致
+      var plain = text
+        .replace(/\*\*([^*]+)\*\*/g, '$1')
+        .replace(/\*([^*]+)\*/g, '$1')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/\[\[([^\]]+)\]\]/g, '$1')
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+        .trim();
+      // 递归遍历所有文本节点，找到包含目标文字的那一个
+      function walk(node) {
+        if (node.nodeType === 3) { // TEXT_NODE
+          var t = node.textContent.trim();
+          if (t.indexOf(text) >= 0 || (plain !== text && t.indexOf(plain) >= 0)) return node.parentNode;
+          return null;
+        }
+        for (var i = 0; i < node.childNodes.length; i++) {
+          var found = walk(node.childNodes[i]);
+          if (found) return found;
+        }
+        return null;
+      }
+      return walk(editorPreview);
+    }
+
+    function _highlightAndScroll(el) {
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      var origBg = el.style.background;
+      var origOutline = el.style.outline;
+      el.style.background = 'rgba(200,164,78,0.35)';
+      el.style.outline = '3px solid #c8a44e';
+      el.style.outlineOffset = '-2px';
+      el.style.borderRadius = '4px';
+      setTimeout(function() {
+        el.style.background = origBg || '';
+        el.style.outline = origOutline || '';
+        el.style.outlineOffset = '';
+        el.style.borderRadius = '';
+      }, 4000);
     }
 
     editBtn.onclick = function() {

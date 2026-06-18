@@ -22,8 +22,9 @@ _index_build_status = {
     "complete": False
 }
 
-# 模型加载状态
+# 模型加载状态 + 线程锁（防止并发加载导致竞态问题）
 _model_loading = False
+_model_load_lock = threading.Lock()
 
 # 索引自动更新检查：记录上次检查时间，避免每次搜索都遍历文件
 _last_index_check_time = 0
@@ -57,72 +58,82 @@ _torch_directml = None  # 缓存 torch_directml 模块引用
 
 def _load_model():
     """延迟加载本地 model"""
-    global _embedding_model, _tokenizer, _model_loading, _embedding_available, _device, _dml_device, _torch_directml
+    global _embedding_model, _tokenizer, _model_loading, _embedding_available, _device, _dml_device, _torch_directml, _model_load_lock
     
-    if _embedding_model is None:
+    # 线程锁：防止多个线程同时加载模型导致竞态问题
+    if not _model_load_lock.acquire(blocking=False):
+        # 其他线程正在加载模型，等待它完成
+        with _model_load_lock:
+            pass  # 锁释放后，_embedding_model 应该已经被设置了
+        return _embedding_model is not None
+    
+    try:
+        if _embedding_model is not None:
+            return True
+        
+        _model_loading = True
+        print(f"[Embedding] 正在加载本地模型：{_embedding_model_name}")
+        
+        import torch
+        import os
+        
+        # 设置离线模式，避免连接 HuggingFace 超时
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        
+        # 尝试使用 DirectML (支持所有 Windows GPU，包括 RTX 5060)
+        _device = "cpu"
+        _dml_device = None
+        _torch_directml = None
         try:
-            _model_loading = True
-            print(f"[Embedding] 正在加载本地模型：{_embedding_model_name}")
-            
-            import torch
-            import os
-            
-            # 设置离线模式，避免连接 HuggingFace 超时
-            os.environ["HF_HUB_OFFLINE"] = "1"
-            os.environ["TRANSFORMERS_OFFLINE"] = "1"
-            
-            # 尝试使用 DirectML (支持所有 Windows GPU，包括 RTX 5060)
-            _device = "cpu"
+            import torch_directml
+            _torch_directml = torch_directml
+            _dml_device = torch_directml.device()
+            print(f"[Embedding] DirectML 可用，使用 GPU 加速: {torch_directml.device_name(0)}")
+        except ImportError:
+            print("[Embedding] torch-directml 未安装，使用 CPU")
+        except Exception as dml_err:
+            print(f"[Embedding] DirectML 初始化失败，使用 CPU: {dml_err}")
             _dml_device = None
-            _torch_directml = None
-            try:
-                import torch_directml
-                _torch_directml = torch_directml
-                _dml_device = torch_directml.device()
-                print(f"[Embedding] DirectML 可用，使用 GPU 加速: {torch_directml.device_name(0)}")
-            except ImportError:
-                print("[Embedding] torch-directml 未安装，使用 CPU")
-            except Exception as dml_err:
-                print(f"[Embedding] DirectML 初始化失败，使用 CPU: {dml_err}")
-                _dml_device = None
-            
-            # 用 transformers 加载（手动控制推理，绕过 DirectML 不兼容操作）
-            from transformers import AutoModel, AutoTokenizer
-            
-            _tokenizer = AutoTokenizer.from_pretrained(_embedding_model_name, trust_remote_code=True, padding_side="left")
-            
-            if _dml_device is not None:
-                # DirectML: 用 float32 加载
-                _embedding_model = AutoModel.from_pretrained(
-                    _embedding_model_name,
-                    trust_remote_code=True,
-                    dtype=torch.float32
-                )
-                _embedding_model = _embedding_model.to(_dml_device)
-                print("[Embedding] Model 加载完成！(DirectML GPU 模式)")
-            else:
-                _embedding_model = AutoModel.from_pretrained(
-                    _embedding_model_name,
-                    trust_remote_code=True
-                )
-                print("[Embedding] Model 加载完成！(CPU 模式)")
-            
-            _embedding_model.eval()
-            _embedding_available = True
-            _model_loading = False
-        except ImportError as e:
-            _model_loading = False
-            print(f"[Embedding] 缺少依赖库：{e}")
-            print("[Embedding] 请运行：uv pip install modelscope torch torch-directml")
-            return False
-        except Exception as e:
-            _model_loading = False
-            print(f"[Embedding] 模型加载失败：{e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    
-    return True
+        
+        # 用 transformers 加载（手动控制推理，绕过 DirectML 不兼容操作）
+        from transformers import AutoModel, AutoTokenizer
+        
+        _tokenizer = AutoTokenizer.from_pretrained(_embedding_model_name, trust_remote_code=True, padding_side="left")
+        
+        if _dml_device is not None:
+            # DirectML: 用 float32 加载
+            _embedding_model = AutoModel.from_pretrained(
+                _embedding_model_name,
+                trust_remote_code=True,
+                dtype=torch.float32
+            )
+            _embedding_model = _embedding_model.to(_dml_device)
+            print("[Embedding] Model 加载完成！(DirectML GPU 模式)")
+        else:
+            _embedding_model = AutoModel.from_pretrained(
+                _embedding_model_name,
+                trust_remote_code=True
+            )
+            print("[Embedding] Model 加载完成！(CPU 模式)")
+        
+        _embedding_model.eval()
+        _embedding_available = True
+        _model_loading = False
+        return True
+    except ImportError as e:
+        _model_loading = False
+        print(f"[Embedding] 缺少依赖库：{e}")
+        print("[Embedding] 请运行：uv pip install modelscope torch torch-directml")
+        return False
+    except Exception as e:
+        _model_loading = False
+        print(f"[Embedding] 模型加载失败：{e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    finally:
+        _model_load_lock.release()
 
 
 def _compute_embedding_batch(texts):
@@ -1034,8 +1045,11 @@ def register(gw):
     print("[Embedding] RPC 方法已注册")
     print(f"[Embedding] 使用本地模型：{_embedding_model_name}")
     
-    # 异步预加载模型，不影响 RPC 启动
+    # 异步预加载模型，不影响 RPC 启动（带重试，DirectML 加载有时会概率性失败）
     def _preload():
-        _load_model()
+        for attempt in range(3):
+            if _load_model():
+                break
+            time.sleep(2)
     t = threading.Thread(target=_preload, daemon=True, name="embedding-preload")
     t.start()

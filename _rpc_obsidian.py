@@ -42,25 +42,41 @@ class _VaultWatcher:
                     self.watcher = watcher
                     import time as _time
                     self._last_push = 0
-                def _inc(self, event):
+                def _debounce(self):
+                    """检查是否去抖，返回 True 表示可以推送"""
                     import time as _time
                     now = _time.time()
-                    # 去抖：2000ms 内不重复推送（防止系统进程在读取文件时触发 on_modified）
                     if now - self._last_push < 2.0:
-                        return
+                        return False
                     self._last_push = now
-                    src = event.src_path.replace("\\", "/")
+                    return True
+                def _push_path(self, path: str, event_type: str = "unknown"):
+                    """统一推送 vault_changed 事件（带去抖和临时文件过滤）"""
+                    if not self._debounce():
+                        print(f"[ObsVault] DEB: 忽略 {event_type} {path}（去抖中）")
+                        return
+                    src = path.replace("\\", "/")
                     name = os.path.basename(src)
                     if name.startswith(".") or name.endswith((".tmp", ".swp")):
+                        print(f"[ObsVault] SKIP: 跳过临时文件 {event_type} {src}")
                         return
                     with self.watcher._lock:
                         self.watcher._version += 1
-                    _broadcast.push_event("obsidian.vault_changed", {"version": self.watcher._version})
-                def on_created(self, e):   self._inc(e)
-                def on_deleted(self, e):    self._inc(e)
+                    print(f"[ObsVault] PUSH: {event_type} → v{self.watcher._version} src_path={src}")
+                    _broadcast.push_event("obsidian.vault_changed", {"version": self.watcher._version, "src_path": src})
+                def on_created(self, e):
+                    self._push_path(e.src_path, "created")
+                def on_deleted(self, e):
+                    self._push_path(e.src_path, "deleted")
                 def on_moved(self, e):
+                    # 原子写入（Obsidian）：写临时文件 → 重命名为目标文件
+                    # 此时 src_path 是临时文件，dest_path 才是真正的文件
                     if e.dest_path:
-                        self._inc(e)
+                        print(f"[ObsVault] MOVE: src={e.src_path} → dest={e.dest_path}")
+                        self._push_path(e.dest_path, "moved")
+                def on_modified(self, e):
+                    print(f"[ObsVault] MODIFY: {e.src_path}")
+                    self._push_path(e.src_path, "modified")
 
             self._observer = Observer()
             self._observer.schedule(_Handler(self), native_path, recursive=True)
@@ -224,6 +240,168 @@ def register(gw):
     gw._methods["obsidian.delete_note"] = _obsidian_delete_note
     gw._methods["obsidian.select_vault"] = _obsidian_select_vault
     gw._methods["obsidian.get_vault_version"] = _obsidian_get_vault_version
+
+    # ── Todo 扫描 ──
+    import re as _re
+
+    def _find_todo_file(vault):
+        """在 vault 中递归查找 待办事项.md，返回 (Path, relative_path)"""
+        vault_p = Path(vault)
+        # 先检查根目录
+        root_file = vault_p / "待办事项.md"
+        if root_file.exists():
+            return root_file, "待办事项.md"
+        # 递归搜索
+        for f in sorted(vault_p.rglob("待办事项.md")):
+            rel = str(f.relative_to(vault_p).as_posix())
+            return f, rel
+        return None, None
+
+    def _obsidian_scan_todos(rid, params):
+        """从 vault 中查找 待办事项.md，读取 --- 分割线之间的待办内容"""
+        active_vault = _get_active_vault()
+        if not active_vault:
+            return gw._ok(rid, {"todos": [], "todo_relpath": None})
+        todo_file, rel_path = _find_todo_file(active_vault)
+        if not todo_file:
+            return gw._ok(rid, {"todos": [], "todo_relpath": None})
+        todos = []
+        abs_path = str(todo_file.resolve())
+        try:
+            content = todo_file.read_text("utf-8", errors="replace")
+        except Exception:
+            return gw._ok(rid, {"todos": [], "todo_relpath": rel_path})
+        # 逐行扫描，只取 --- 分割线之间的内容（标记实际行号）
+        all_lines = content.split("\n")
+        in_section = False
+        section_enter_at = 0
+        for i, line in enumerate(all_lines, 1):
+            stripped = line.strip()
+            # 检测 --- 分割线（单独一行）
+            if _re.match(r"^-{3,}\s*$", stripped):
+                # 跳过文件首行的 ---（Obsidian frontmatter 开始标记）
+                if i == 1:
+                    print(f"[TodoScan] 跳过首行分隔线(行1, frontmatter)")
+                    continue
+                in_section = not in_section
+                if in_section:
+                    section_enter_at = i
+                    print(f"[TodoScan] 进入区域: 行{i}")
+                else:
+                    print(f"[TodoScan] 离开区域: 行{i} (区域从行{section_enter_at}到行{i})")
+                continue
+            if not in_section:
+                continue
+            # 调试：打印区域内非待办行
+            if not _re.match(r"^\s*-\s+\[([ xX])\]", line) and line.strip():
+                print(f"[TodoScan] 区域内非待办 行{i}: {line.rstrip()}")
+            m = _re.match(r"^\s*-\s+\[([ xX])\]\s+(.+)$", line)
+            if m:
+                done = m.group(1) in ("x", "X")
+                text = m.group(2).strip()
+                todos.append({
+                    "path": rel_path,
+                    "absPath": abs_path,
+                    "line": i,
+                    "text": text,
+                    "done": done,
+                })
+                print(f"[TodoScan] 匹配待办 行{i}: {line.rstrip()} → text={text!r}")
+        return gw._ok(rid, {"todos": todos, "todo_relpath": rel_path})
+
+    def _obsidian_toggle_todo(rid, params):
+        """切换待办事项.md 中某个待办的完成状态"""
+        active_vault = _get_active_vault()
+        if not active_vault:
+            return gw._err(rid, 4004, "no vault configured")
+        todo_file, _ = _find_todo_file(active_vault)
+        if not todo_file:
+            return gw._err(rid, 4004, "待办事项.md not found")
+        line_no = int(params.get("line", 0))
+        done = bool(params.get("done", False))
+        try:
+            lines = todo_file.read_text("utf-8", errors="replace").split("\n")
+        except Exception as e:
+            return gw._err(rid, 5000, str(e))
+        if line_no < 1 or line_no > len(lines):
+            return gw._err(rid, 4000, f"line {line_no} out of range")
+        old = lines[line_no - 1]
+        if done:
+            new = _re.sub(r"-\s+\[[ xX]\]", "- [x]", old, count=1)
+        else:
+            new = _re.sub(r"-\s+\[[ xX]\]", "- [ ]", old, count=1)
+        if new == old:
+            return gw._ok(rid, {"changed": False})
+        lines[line_no - 1] = new
+        todo_file.write_text("\n".join(lines), "utf-8")
+        return gw._ok(rid, {"changed": True})
+
+    def _obsidian_add_todo(rid, params):
+        """在待办事项.md 的分割线之间添加一条新的待办"""
+        text = str(params.get("text", "")).strip()
+        if not text:
+            return gw._err(rid, 4000, "todo text required")
+        active_vault = _get_active_vault()
+        if not active_vault:
+            return gw._err(rid, 4004, "no vault configured")
+        todo_file, rel_path = _find_todo_file(active_vault)
+        if not todo_file:
+            return gw._err(rid, 4004, "待办事项.md not found")
+        content = todo_file.read_text("utf-8", errors="replace")
+        # 在第一个 --- 分割线后插入新待办
+        # 找到第一个 --- 的位置
+        idx = content.find("\n---")
+        if idx == -1:
+            # 没有分割线，直接在末尾插入
+            new_line = f"\n---\n- [ ] {text}\n---\n"
+            content += new_line
+        else:
+            # 在第一个 --- 后面插入
+            after_divider = idx + 4  # 跳过 \n---
+            # 检查是否有第二个 ---
+            second = content.find("\n---", after_divider)
+            if second == -1:
+                # 没有第二个分割线，创建一个新区域
+                new_line = f"\n- [ ] {text}\n---\n"
+            else:
+                # 在第一个和第二个分割线之间插入
+                before_second = content[:second]
+                after_second = content[second:]
+                new_line = f"- [ ] {text}\n"
+                content = before_second + new_line + after_second
+                todo_file.write_text(content, "utf-8")
+                return gw._ok(rid, {"added": True, "relpath": rel_path})
+            content += new_line
+        todo_file.write_text(content, "utf-8")
+        return gw._ok(rid, {"added": True, "relpath": rel_path})
+
+    def _obsidian_delete_todo_line(rid, params):
+        """删除待办事项.md 中指定行的内容"""
+        active_vault = _get_active_vault()
+        if not active_vault:
+            return gw._err(rid, 4004, "no vault configured")
+        todo_file, _ = _find_todo_file(active_vault)
+        if not todo_file:
+            return gw._err(rid, 4004, "待办事项.md not found")
+        line_no = int(params.get("line", 0))
+        try:
+            lines = todo_file.read_text("utf-8", errors="replace").split("\n")
+        except Exception as e:
+            return gw._err(rid, 5000, str(e))
+        if line_no < 1 or line_no > len(lines):
+            return gw._err(rid, 4000, f"line {line_no} out of range")
+        old_text = lines[line_no - 1]
+        # 检查该行是否真的是待办项（防止误删非待办行）
+        if not _re.match(r"^\s*-\s+\[[ xX]\]", old_text):
+            return gw._err(rid, 4000, "line is not a todo item")
+        del lines[line_no - 1]
+        todo_file.write_text("\n".join(lines), "utf-8")
+        return gw._ok(rid, {"deleted": True})
+
+    gw._methods["obsidian.scan_todos"] = _obsidian_scan_todos
+    gw._methods["obsidian.toggle_todo"] = _obsidian_toggle_todo
+    gw._methods["obsidian.add_todo"] = _obsidian_add_todo
+    gw._methods["obsidian.delete_todo_line"] = _obsidian_delete_todo_line
 
     # 自动启动对已配置 vault 的监控
     active = _get_active_vault()

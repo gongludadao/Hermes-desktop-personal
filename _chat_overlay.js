@@ -95,7 +95,7 @@
     });
 
     var s = hdcEscape(text);
-    s = s.replace(/&lt;span\s+style="color:(#[0-9a-fA-F]+)"&gt;/g, '<span style="color:$1">');
+    s = s.replace(/&lt;span\s+style=&quot;color:(#[0-9a-fA-F]+)&quot;&gt;/g, '<span style="color:$1">');
     s = s.replace(/&lt;\/span&gt;/g, '</span>');
     s = s.replace(/&lt;b&gt;/g, '<b>').replace(/&lt;\/b&gt;/g, '</b>');
     s = s.replace(/&lt;strong&gt;/g, '<strong>').replace(/&lt;\/strong&gt;/g, '</strong>');
@@ -450,6 +450,22 @@
         '</div>' +
       '</div>' +
       '</div>' + // hdc-ws-scroll-area 结束
+      // ── 待办事项面板（固定在底部） ──
+      '<div id="hdc-ws-todo-panel" style="flex-shrink:0;border-top:1px solid var(--hdc-border);display:flex;flex-direction:column;height:185px;background:var(--hdc-card)">' +
+        '<div style="padding:3px 8px;display:flex;align-items:center;gap:4px;flex-shrink:0;border-bottom:1px solid var(--hdc-border)">' +
+          '<span style="font-size:11px">☑</span>' +
+          '<span style="font-size:11px;color:var(--hdc-fg);font-weight:600">待办事项</span>' +
+          '<span id="hdc-ws-todo-count" style="font-size:10px;color:var(--hdc-fg-dim)"></span>' +
+          '<span style="flex:1"></span>' +
+          '<button id="hdc-ws-todo-refresh" title="刷新" style="background:transparent;border:1px solid var(--hdc-border);border-radius:3px;padding:1px 5px;color:var(--hdc-fg-dim);font-size:10px;cursor:pointer">↻</button>' +
+        '</div>' +
+        '<div id="hdc-ws-todo-list" style="flex:1;overflow-y:auto;padding:2px 4px;font-size:11px">' +
+          '<div style="padding:8px;text-align:center;color:var(--hdc-fg-dim);font-size:10px">加载中...</div>' +
+        '</div>' +
+        '<div style="flex-shrink:0;display:flex;border-top:1px solid var(--hdc-border);padding:3px 4px;gap:3px">' +
+          '<input id="hdc-ws-todo-input" type="text" placeholder="添加待办 (Enter)" style="flex:1;background:transparent;border:1px solid var(--hdc-border);border-radius:3px;padding:2px 5px;color:var(--hdc-fg);font-size:10px;outline:none;min-width:0">' +
+        '</div>' +
+      '</div>' +
       '<div id="hdc-ws-context-menu" style="display:none;position:fixed;background:var(--hdc-card);border:1px solid var(--hdc-border);border-radius:8px;padding:4px 0;z-index:10000;min-width:130px;box-shadow:0 4px 12px rgba(0,0,0,0.35)">' +
         '<div data-action="new-file" class="hdc-menu-item" style="padding:6px 16px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'">\ud83d\udcc4 \u65b0\u5efa\u6587\u4ef6</div>' +
         '<div data-action="new-folder" class="hdc-menu-item" style="padding:6px 16px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'">\ud83d\udcc1 \u65b0\u5efa\u6587\u4ef6\u5939</div>' +
@@ -478,6 +494,11 @@
         '<div data-action="stock-settings" class="hdc-menu-item" style="padding:6px 16px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'">\u2699 \u8bbe\u7f6e</div>' +
         createSendAIContextMenuOption('stock-insert') +
         '<div data-action="stock-delete" class="hdc-menu-item-red" style="padding:6px 16px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'">\u2715 \u5220\u9664</div>' +
+      '</div>' +
+      '<div id="hdc-ws-todo-context-menu" style="display:none;position:fixed;background:var(--hdc-card);border:1px solid var(--hdc-border);border-radius:8px;padding:4px 0;z-index:10003;min-width:140px;box-shadow:0 4px 12px rgba(0,0,0,0.35)">' +
+        createSendAIContextMenuOption('todo-send-ai') +
+        '<div style="height:1px;background:var(--hdc-border);margin:4px 0"></div>' +
+        '<div data-action="todo-delete" class="hdc-menu-item-red" style="padding:6px 16px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'">\u2715 \u5220\u9664\u5f85\u529e</div>' +
       '</div>' +
     '</div>' +
     '<div id="hdc-input-dialog" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:10002;background:rgba(0,0,0,0.4);align-items:center;justify-content:center">' +
@@ -716,6 +737,10 @@
       }
       if (typeof wsNoteContextMenu !== 'undefined' && wsNoteContextMenu.style.display !== 'none' && !wsNoteContextMenu.contains(e.target)) {
         hideNoteContextMenu();
+      }
+      var wsTodoContextMenu = document.getElementById('hdc-ws-todo-context-menu');
+      if (wsTodoContextMenu && wsTodoContextMenu.style.display !== 'none' && !wsTodoContextMenu.contains(e.target)) {
+        wsTodoContextMenu.style.display = 'none';
       }
     });
 
@@ -1270,22 +1295,66 @@
             break;
 
           case 'obsidian.vault_changed':
-            // 前端去抖：3 秒内不重复刷新
-            if (window._lastTreeRefresh && Date.now() - window._lastTreeRefresh < 3000) {
-              console.log('[Overlay] obsidian.vault_changed debounced, skip');
-              break;
+            // 预览面板刷新：只要有文件变化，就重新读取当前打开的文件
+            // 注意：editorPreview、editorTextarea、editorFilename、renderPreview 等变量
+            // 是 buildOverlay() 内的局部变量，在 doConnect() 的 ws.onmessage 作用域中不可达，
+            // 因此这里直接使用 document.getElementById 获取 DOM 元素。
+            if (typeof currentFilePath !== 'undefined' && currentFilePath) {
+              var _prRid = String(++msgId);
+              _rpcCallbacks[_prRid] = function(result) {
+                if (result.error || result.content === undefined) return;
+                if (result.content === currentFileContent) return;
+                currentFileContent = result.content;
+                // 获取 DOM 元素
+                var _ta = document.getElementById('hdc-editor-textarea');
+                var _fn = document.getElementById('hdc-editor-filename');
+                var _pv = document.getElementById('hdc-editor-preview');
+                if (_ta) _ta.value = result.content;
+                if (_fn) _fn.textContent = (_fn.textContent || '').replace(' ●', '');
+                if (_pv) {
+                  var _ext2 = 'md';
+                  if (currentFilePath) {
+                    var _dotIdx = currentFilePath.lastIndexOf('.');
+                    if (_dotIdx >= 0) _ext2 = currentFilePath.substring(_dotIdx + 1).toLowerCase();
+                  }
+                  _pv.innerHTML = '';
+                  _pv.style.display = '';
+                  if (_ext2 === 'md' || _ext2 === 'markdown') {
+                    if (typeof renderMarkdown === 'function') {
+                      _pv.innerHTML = '<div style="font-family:var(--hdc-font)">' + renderMarkdown(result.content) + '</div>';
+                    } else {
+                      _pv.innerHTML = '<div style="font-family:var(--hdc-font);white-space:pre-wrap;padding:10px">' + hdcEscape(result.content) + '</div>';
+                    }
+                  } else {
+                    _pv.innerHTML = '<div style="font-family:var(--hdc-mono);white-space:pre-wrap;padding:10px">' + hdcEscape(result.content) + '</div>';
+                  }
+                }
+              };
+              ws.send(JSON.stringify({ jsonrpc: '2.0', id: _prRid, method: 'fs.read_file', params: { path: currentFilePath } }));
             }
-            window._lastTreeRefresh = Date.now();
-            console.log('[Overlay] obsidian.vault_changed event received, version:', p.version);
-            addMsg('[ObsVault] \u68c0\u6d4b\u5230\u6587\u4ef6\u53d8\u5316\uff0c\u6b63\u5728\u5237\u65b0\u6811...', 'sys');
-            if (typeof window._refreshVaultTree === 'function') {
-              window._refreshVaultTree();
+            // 待办刷新使用独立去抖
+            if (typeof window.refreshTodoList === 'function') {
+              if (!window._lastTodoRefresh || Date.now() - window._lastTodoRefresh > 2000) {
+                window._lastTodoRefresh = Date.now();
+                window.refreshTodoList();
+              }
+            }
+            // 树刷新去抖：3 秒内不重复（只对创建/删除/移动有效，内容修改不影响树结构）
+            if (window._lastTreeRefresh && Date.now() - window._lastTreeRefresh < 3000) {
+              console.log('[Overlay] obsidian.vault_changed debounced, skip tree');
             } else {
-              // 回退：直接重新加载根目录
-              if (typeof obsRoot !== 'undefined' && obsRoot && typeof wsObsTree !== 'undefined' && wsObsTree) {
-                obsTreeContainers = {};
-                wsObsTree.innerHTML = '';
-                loadObsDir(obsRoot, wsObsTree, 0);
+              window._lastTreeRefresh = Date.now();
+              console.log('[Overlay] obsidian.vault_changed event received, version:', p.version);
+              addMsg('[ObsVault] \u68c0\u6d4b\u5230\u6587\u4ef6\u53d8\u5316\uff0c\u6b63\u5728\u5237\u65b0\u6811...', 'sys');
+              if (typeof window._refreshVaultTree === 'function') {
+                window._refreshVaultTree();
+              } else {
+                // 回退：直接重新加载根目录
+                if (typeof obsRoot !== 'undefined' && obsRoot && typeof wsObsTree !== 'undefined' && wsObsTree) {
+                  obsTreeContainers = {};
+                  wsObsTree.innerHTML = '';
+                  loadObsDir(obsRoot, wsObsTree, 0);
+                }
               }
             }
             break;

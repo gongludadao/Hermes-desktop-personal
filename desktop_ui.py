@@ -126,6 +126,7 @@ _CHAT_OVERLAY_MODULES = [
     "_clipboard_translate.js",
     "_stock_sidebar.js",
     "_obsidian_vault.js",
+    "_todo_panel.js",
 ]
 _chat_overlay_injected = False
 
