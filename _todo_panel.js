@@ -246,11 +246,10 @@
       countEl.textContent = '(' + (total - done) + '/' + total + ')';
     }
 
-    // 通过事件总线注册待办刷新（2 秒去抖）
+    // 通过事件总线注册待办刷新（无防抖）
     window._registerVaultHandler('todo', function(payload) {
-      console.log('[TodoPanel] vault_changed received, refreshing...');
       refreshTodoList();
-    }, 2000);
+    }, 0);
 
     // 等待侧边栏就绪后初始化
     var _todoWsCheck = setInterval(function() {
