@@ -119,6 +119,7 @@ def _check_web_dist():
 
 _CHAT_OVERLAY_JS_PATH = _DESKTOP_DIR / "_chat_overlay.js"
 _CHAT_OVERLAY_MODULES = [
+    "_event_bus.js",         # 必须放在第一位：统一事件分发总线
     "_attach_to_ai.js",
     "_editor_panel.js",
     "_file_manager.js",

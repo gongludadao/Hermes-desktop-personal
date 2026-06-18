@@ -2323,6 +2323,41 @@
     };
     document.getElementById('hdc-editor-body').appendChild(insertBtn);
 
+    // ── 通过事件总线注册预览刷新 ──
+    window._registerVaultHandler('preview', function(payload) {
+      if (typeof currentFilePath === 'undefined' || !currentFilePath) return;
+      var _prRid = String(++msgId);
+      _rpcCallbacks[_prRid] = function(result) {
+        if (result.error || result.content === undefined) return;
+        if (result.content === currentFileContent) return;
+        currentFileContent = result.content;
+        var _ta = document.getElementById('hdc-editor-textarea');
+        var _fn = document.getElementById('hdc-editor-filename');
+        var _pv = document.getElementById('hdc-editor-preview');
+        if (_ta) _ta.value = result.content;
+        if (_fn) _fn.textContent = (_fn.textContent || '').replace(' ●', '');
+        if (_pv) {
+          var _ext2 = 'md';
+          if (currentFilePath) {
+            var _dotIdx = currentFilePath.lastIndexOf('.');
+            if (_dotIdx >= 0) _ext2 = currentFilePath.substring(_dotIdx + 1).toLowerCase();
+          }
+          _pv.innerHTML = '';
+          _pv.style.display = '';
+          if (_ext2 === 'md' || _ext2 === 'markdown') {
+            if (typeof renderMarkdown === 'function') {
+              _pv.innerHTML = '<div style="font-family:var(--hdc-font)">' + renderMarkdown(result.content) + '</div>';
+            } else {
+              _pv.innerHTML = '<div style="font-family:var(--hdc-font);white-space:pre-wrap;padding:10px">' + hdcEscape(result.content) + '</div>';
+            }
+          } else {
+            _pv.innerHTML = '<div style="font-family:var(--hdc-mono);white-space:pre-wrap;padding:10px">' + hdcEscape(result.content) + '</div>';
+          }
+        }
+      };
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id: _prRid, method: 'fs.read_file', params: { path: currentFilePath } }));
+    }, 500);
+
     // 点击其他区域时隐藏插入按钮
     document.addEventListener('mousedown', function(e) {
       if (insertBtn.contains(e.target)) return;

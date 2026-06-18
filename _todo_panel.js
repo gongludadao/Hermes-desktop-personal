@@ -240,8 +240,8 @@
       countEl.textContent = '(' + (total - done) + '/' + total + ')';
     }
 
-    // 导出到全局，供 _chat_overlay.js 的 ws.onmessage 调用
-    window.refreshTodoList = refreshTodoList;
+    // 通过事件总线注册待办刷新（2 秒去抖）
+    window._registerVaultHandler('todo', function() { refreshTodoList(); }, 2000);
 
     // 等待侧边栏就绪后初始化
     var _todoWsCheck = setInterval(function() {

@@ -1295,67 +1295,10 @@
             break;
 
           case 'obsidian.vault_changed':
-            // 预览面板刷新：只要有文件变化，就重新读取当前打开的文件
-            // 注意：editorPreview、editorTextarea、editorFilename、renderPreview 等变量
-            // 是 buildOverlay() 内的局部变量，在 doConnect() 的 ws.onmessage 作用域中不可达，
-            // 因此这里直接使用 document.getElementById 获取 DOM 元素。
-            if (typeof currentFilePath !== 'undefined' && currentFilePath) {
-              var _prRid = String(++msgId);
-              _rpcCallbacks[_prRid] = function(result) {
-                if (result.error || result.content === undefined) return;
-                if (result.content === currentFileContent) return;
-                currentFileContent = result.content;
-                // 获取 DOM 元素
-                var _ta = document.getElementById('hdc-editor-textarea');
-                var _fn = document.getElementById('hdc-editor-filename');
-                var _pv = document.getElementById('hdc-editor-preview');
-                if (_ta) _ta.value = result.content;
-                if (_fn) _fn.textContent = (_fn.textContent || '').replace(' ●', '');
-                if (_pv) {
-                  var _ext2 = 'md';
-                  if (currentFilePath) {
-                    var _dotIdx = currentFilePath.lastIndexOf('.');
-                    if (_dotIdx >= 0) _ext2 = currentFilePath.substring(_dotIdx + 1).toLowerCase();
-                  }
-                  _pv.innerHTML = '';
-                  _pv.style.display = '';
-                  if (_ext2 === 'md' || _ext2 === 'markdown') {
-                    if (typeof renderMarkdown === 'function') {
-                      _pv.innerHTML = '<div style="font-family:var(--hdc-font)">' + renderMarkdown(result.content) + '</div>';
-                    } else {
-                      _pv.innerHTML = '<div style="font-family:var(--hdc-font);white-space:pre-wrap;padding:10px">' + hdcEscape(result.content) + '</div>';
-                    }
-                  } else {
-                    _pv.innerHTML = '<div style="font-family:var(--hdc-mono);white-space:pre-wrap;padding:10px">' + hdcEscape(result.content) + '</div>';
-                  }
-                }
-              };
-              ws.send(JSON.stringify({ jsonrpc: '2.0', id: _prRid, method: 'fs.read_file', params: { path: currentFilePath } }));
-            }
-            // 待办刷新使用独立去抖
-            if (typeof window.refreshTodoList === 'function') {
-              if (!window._lastTodoRefresh || Date.now() - window._lastTodoRefresh > 2000) {
-                window._lastTodoRefresh = Date.now();
-                window.refreshTodoList();
-              }
-            }
-            // 树刷新去抖：3 秒内不重复（只对创建/删除/移动有效，内容修改不影响树结构）
-            if (window._lastTreeRefresh && Date.now() - window._lastTreeRefresh < 3000) {
-              console.log('[Overlay] obsidian.vault_changed debounced, skip tree');
-            } else {
-              window._lastTreeRefresh = Date.now();
-              console.log('[Overlay] obsidian.vault_changed event received, version:', p.version);
-              addMsg('[ObsVault] \u68c0\u6d4b\u5230\u6587\u4ef6\u53d8\u5316\uff0c\u6b63\u5728\u5237\u65b0\u6811...', 'sys');
-              if (typeof window._refreshVaultTree === 'function') {
-                window._refreshVaultTree();
-              } else {
-                // 回退：直接重新加载根目录
-                if (typeof obsRoot !== 'undefined' && obsRoot && typeof wsObsTree !== 'undefined' && wsObsTree) {
-                  obsTreeContainers = {};
-                  wsObsTree.innerHTML = '';
-                  loadObsDir(obsRoot, wsObsTree, 0);
-                }
-              }
+            console.log('[Overlay] obsidian.vault_changed event received, version:', p.version);
+            // 通过事件总线分发给各注册模块（预览、待办、树等）
+            if (typeof window._dispatchVaultChanged === 'function') {
+              window._dispatchVaultChanged(p);
             }
             break;
 
