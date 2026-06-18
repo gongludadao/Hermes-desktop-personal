@@ -431,7 +431,6 @@
         '<span>\ud83d\udcd8</span>' +
         '<span style="font-size:12px;color:var(--hdc-fg)">Obsidian \u4ed3\u5e93</span>' +
         '<span style="flex:1"></span>' +
-        '<button id="hdc-ws-obs-refresh" title="\u5237\u65b0\u76ee\u5f55\u6811" style="background:transparent;border:1px solid var(--hdc-border);border-radius:3px;padding:2px 6px;color:var(--hdc-fg-dim);font-size:10px;cursor:pointer">\u21bb</button>' +
         '<button id="hdc-ws-obs-switch-vault" title="\u5207\u6362\u4ed3\u5e93" style="background:transparent;border:1px solid var(--hdc-border);border-radius:3px;padding:2px 6px;color:var(--hdc-fg-dim);font-size:10px;cursor:pointer">\ud83d\udd04</button>' +
       '</div>' +
       '<div id="hdc-ws-obs-body" style="display:none;flex-direction:column;overflow:hidden">' +
@@ -465,7 +464,7 @@
           '<span style="font-size:11px;color:var(--hdc-fg);font-weight:600">待办事项</span>' +
           '<span id="hdc-ws-todo-count" style="font-size:10px;color:var(--hdc-fg-dim)"></span>' +
           '<span style="flex:1"></span>' +
-          '<button id="hdc-ws-todo-refresh" title="刷新" style="background:transparent;border:1px solid var(--hdc-border);border-radius:3px;padding:1px 5px;color:var(--hdc-fg-dim);font-size:10px;cursor:pointer">↻</button>' +
+          '<button id="hdc-ws-todo-refresh" title="刷新" style="background:transparent;border:1px solid var(--hdc-border);border-radius:3px;padding:1px 5px;color:var(--hdc-fg-dim);font-size:10px;cursor:pointer">⇄</button>' +
         '</div>' +
         '<div id="hdc-ws-todo-list" style="flex:1;overflow-y:auto;padding:2px 4px;font-size:11px">' +
           '<div style="padding:8px;text-align:center;color:var(--hdc-fg-dim);font-size:10px">加载中...</div>' +
@@ -536,7 +535,7 @@
       'ws-clip-count', 'ws-clip-refresh', 'ws-note-context-menu', 'ws-clip-context-menu',
       'ws-stock-header', 'ws-stock-body', 'ws-stock-arrow', 'ws-stock-input',
       'ws-stock-add', 'ws-stock-dropdown', 'ws-obs-header', 'ws-obs-body',
-      'ws-obs-arrow', 'ws-obs-tree', 'ws-obs-switch-vault', 'ws-obs-refresh',
+      'ws-obs-arrow', 'ws-obs-tree', 'ws-obs-switch-vault',
       'ws-stock-refresh', 'ws-stock-list', 'ws-stock-status', 'ws-stock-context-menu',
       'editor-panel', 'editor-filename', 'editor-textarea', 'editor-preview',
       'editor-edit', 'resizer-editor', 'resizer-sidebar',
@@ -597,7 +596,6 @@
     var wsObsArrow = ui['ws-obs-arrow'];
     var wsObsTree = ui['ws-obs-tree'];
     var wsObsSwitchVault = ui['ws-obs-switch-vault'];
-    var wsObsRefresh = ui['ws-obs-refresh'];
     var _stockSearchTimer = null;
     var wsStockRefresh = ui['ws-stock-refresh'];
     var wsStockList = ui['ws-stock-list'];
