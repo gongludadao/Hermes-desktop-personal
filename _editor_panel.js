@@ -682,6 +682,86 @@
       });
     }
 
+    // 绑定预览面板中待办复选框的点击事件
+    function _bindTodoClicks(container, filePath) {
+      if (!filePath) return;
+      // 只处理待办事项.md 文件
+      if (!filePath.toLowerCase().includes('待办事项.md')) return;
+      
+      var checkboxes = container.querySelectorAll('.hdc-todo-checkbox');
+      checkboxes.forEach(function(cb) {
+        cb.addEventListener('click', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          
+          // 获取当前文件内容，找到匹配的行号
+          if (!currentFileContent) return;
+          
+          var textSpan = cb.nextElementSibling;
+          if (!textSpan) return;
+          
+          var todoText = textSpan.textContent.trim();
+          var currentDone = cb.getAttribute('data-done') === '1';
+          var newDone = !currentDone;
+          
+          // 在文件内容中查找匹配的行
+          var lines = currentFileContent.split('\n');
+          var targetLine = -1;
+          for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            // 匹配 - [ ] text 或 - [x] text
+            var m = line.match(/^\s*-\s+\[[ xX]\]\s+(.+)$/);
+            if (m && m[1].trim() === todoText) {
+              targetLine = i + 1; // 行号从1开始
+              break;
+            }
+          }
+          
+          if (targetLine < 0) {
+            console.error('[TodoClick] 找不到匹配的行:', todoText);
+            return;
+          }
+          
+          // 发送 toggle_todo RPC
+          var rpcId = String(++msgId);
+          _rpcCallbacks[rpcId] = function(result) {
+            if (result && result.error) {
+              console.error('[TodoClick] toggle failed:', result.error);
+              return;
+            }
+            // 切换成功，刷新预览
+            if (typeof currentFilePath !== 'undefined' && currentFilePath) {
+              var refreshId = String(++msgId);
+              _rpcCallbacks[refreshId] = function(r) {
+                if (r.error || !r.content) return;
+                currentFileContent = r.content;
+                // 更新标签缓存
+                if (_activeTabId) {
+                  var tab = _editorTabs.find(function(t) { return t.id === _activeTabId; });
+                  if (tab) tab.content = r.content;
+                }
+                // 重新渲染预览
+                renderPreview(r.content, 'md', currentFilePath);
+              };
+              ws.send(JSON.stringify({
+                jsonrpc: '2.0',
+                id: refreshId,
+                method: 'fs.read_file',
+                params: { path: currentFilePath }
+              }));
+            }
+          };
+          
+          ws.send(JSON.stringify({
+            jsonrpc: '2.0',
+            id: rpcId,
+            method: 'obsidian.toggle_todo',
+            params: { line: targetLine, done: newDone }
+          }));
+        });
+      });
+    }
+
     function renderPreview(content, ext, path) {
       if (!editorPreview) return;
       editorPreview.innerHTML = '';
@@ -708,6 +788,8 @@
         editorPreview.innerHTML = '<div style="font-family:var(--hdc-font)">' + rendered + '</div>';
         // 处理本地图片路径：通过 RPC 读取并转为 base64
         _loadLocalImages(editorPreview, path);
+        // 绑定待办复选框点击事件
+        _bindTodoClicks(editorPreview, path);
         return;
       }
 
