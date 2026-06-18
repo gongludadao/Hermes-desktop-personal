@@ -431,7 +431,7 @@
         '<span>\ud83d\udcd8</span>' +
         '<span style="font-size:12px;color:var(--hdc-fg)">Obsidian \u4ed3\u5e93</span>' +
         '<span style="flex:1"></span>' +
-        '<button id="hdc-ws-obs-switch-vault" title="\u5207\u6362\u4ed3\u5e93" style="background:transparent;border:1px solid var(--hdc-border);border-radius:3px;padding:2px 6px;color:var(--hdc-fg-dim);font-size:10px;cursor:pointer">\u21bb</button>' +
+        '<button id="hdc-ws-obs-switch-vault" title="\u5207\u6362\u4ed3\u5e93" style="background:transparent;border:1px solid var(--hdc-border);border-radius:3px;padding:2px 6px;color:var(--hdc-fg-dim);font-size:10px;cursor:pointer">\u21c4</button>' +
       '</div>' +
       '<div id="hdc-ws-obs-body" style="display:none;flex-direction:column;overflow:hidden">' +
         '<div id="hdc-ws-obs-tree" style="flex:1;overflow-y:auto;padding:4px 0;font-size:12px;min-height:40px">' +
