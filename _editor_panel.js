@@ -2331,6 +2331,11 @@
         if (result.error || result.content === undefined) return;
         if (result.content === currentFileContent) return;
         currentFileContent = result.content;
+        // 同步更新标签缓存，防止跳转时读到旧内容
+        if (_activeTabId) {
+          var _tab = _editorTabs.find(function(t) { return t.id === _activeTabId; });
+          if (_tab) _tab.content = result.content;
+        }
         var _ta = document.getElementById('hdc-editor-textarea');
         var _fn = document.getElementById('hdc-editor-filename');
         var _pv = document.getElementById('hdc-editor-preview');
