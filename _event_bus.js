@@ -22,19 +22,15 @@
      */
     window._dispatchVaultChanged = function(payload) {
       var now = Date.now();
-      console.log('[EventBus] dispatching to handlers:', Object.keys(_vaultHandlers));
       for (var key in _vaultHandlers) {
         var h = _vaultHandlers[key];
         if (h.debounce <= 0 || now - h._last >= h.debounce) {
           h._last = now;
           try {
-            console.log('[EventBus] calling handler:', key);
             h.handler(payload);
           } catch(e) {
             console.error('[EventBus] handler error: ' + key, e);
           }
-        } else {
-          console.log('[EventBus] debounced:', key);
         }
       }
     };

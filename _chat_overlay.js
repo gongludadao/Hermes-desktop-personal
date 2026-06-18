@@ -408,6 +408,7 @@
       '</div>' +
       '<div id="hdc-ws-note-body" style="display:none;flex-direction:column;overflow:hidden">' +
         '<div id="hdc-ws-note-list" style="overflow-y:auto;flex:1;padding:2px 4px;font-size:11px;min-height:40px;max-height:200px">' +
+          '<div style="padding:20px 8px;text-align:center;color:var(--hdc-fg-dim);font-size:11px">\u53f3\u952e\u65b0\u5efa\u7b14\u8bb0</div>' +
         '</div>' +
       '</div>' +
       '<div id="hdc-ws-clip-header" style="padding:6px 8px;border-bottom:1px solid var(--hdc-border);border-top:1px solid var(--hdc-border);display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;flex-shrink:0;background:var(--hdc-card)">'+
@@ -482,10 +483,10 @@
         '<div data-action="copy-path" class="hdc-menu-item-dim" style="padding:6px 16px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'">\ud83d\udccb \u590d\u5236\u8def\u5f84</div>' +
       '</div>' +
       '<div id="hdc-ws-note-context-menu" style="display:none;position:fixed;background:var(--hdc-card);border:1px solid var(--hdc-border);border-radius:8px;padding:4px 0;z-index:10001;min-width:140px;box-shadow:0 4px 12px rgba(0,0,0,0.35)">' +
-        '<div data-action="note-new-file" class="hdc-menu-item" style="padding:6px 16px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'">\ud83d\udcdd \u65b0\u5efa\u7b14\u8bb0</div>' +
+        '<div data-action="note-create" class="hdc-menu-item" style="padding:6px 16px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'">+ \u65b0\u5efa</div>' +
         createSendAIContextMenuOption('note-send-ai') +
         '<div data-action="note-rename" class="hdc-menu-item" style="padding:6px 16px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'">\u270f \u91cd\u547d\u540d</div>' +
-        '<div data-action="note-delete" class="hdc-menu-item-red" style="padding:6px 16px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'\">\u2715 \u5220\u9664</div>' +
+        '<div data-action="note-delete" class="hdc-menu-item-red" style="padding:6px 16px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'">\u2715 \u5220\u9664</div>' +
       '</div>' +
       '<div id="hdc-ws-clip-context-menu" style="display:none;position:fixed;background:var(--hdc-card);border:1px solid var(--hdc-border);border-radius:8px;padding:4px 0;z-index:10001;min-width:140px;box-shadow:0 4px 12px rgba(0,0,0,0.35)">' +
         '<div data-action="clip-select" class="hdc-menu-item" style="padding:6px 16px;cursor:pointer;font-size:12px" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'">\u2611 \u591a\u9009</div>' +

@@ -319,6 +319,10 @@ def register(gw):
             return gw._ok(rid, {"changed": False})
         lines[line_no - 1] = new
         todo_file.write_text("\n".join(lines), "utf-8")
+        # 手动触发 vault_changed 事件（watchdog 可能因去抖错过）
+        with _vault_watcher._lock:
+            _vault_watcher._version += 1
+        _broadcast.push_event("obsidian.vault_changed", {"version": _vault_watcher._version, "src_path": str(todo_file.resolve()).replace("\\", "/")})
         return gw._ok(rid, {"changed": True})
 
     def _obsidian_add_todo(rid, params):

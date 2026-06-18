@@ -18,7 +18,7 @@
     function renderNotepadList() {
       if (!wsNoteList) return;
       if (_notepadList.length === 0) {
-        wsNoteList.innerHTML = '<div style="padding:20px 8px;text-align:center;color:var(--hdc-fg-dim);font-size:11px">\u70b9\u51fb + \u65b0\u5efa\u7b14\u8bb0</div>';
+        wsNoteList.innerHTML = '<div style="padding:20px 8px;text-align:center;color:var(--hdc-fg-dim);font-size:11px">\u53f3\u952e\u65b0\u5efa\u7b14\u8bb0</div>';
         return;
       }
       var html = '';
@@ -139,7 +139,6 @@
       }
     };
 
-    wsNoteAdd.onclick = function(e) { e.stopPropagation(); createNotepad(); };
     wsNoteRefresh.onclick = function(e) { e.stopPropagation(); loadNotepadList(); };
 
     wsNoteList.addEventListener('click', function(e) {
@@ -153,13 +152,20 @@
     });
 
     wsNoteList.addEventListener('contextmenu', function(e) {
-      var noteItem = e.target.closest('[data-note-idx]');
-      if (!noteItem) return;
       e.preventDefault();
       e.stopPropagation();
-      var idx = parseInt(noteItem.getAttribute('data-note-idx'));
-      if (!isNaN(idx) && idx >= 0 && idx < _notepadList.length) {
-        showNoteContextMenu(e, idx);
+      var noteItem = e.target.closest('[data-note-idx]');
+      if (noteItem) {
+        var idx = parseInt(noteItem.getAttribute('data-note-idx'));
+        if (!isNaN(idx) && idx >= 0 && idx < _notepadList.length) {
+          showNoteContextMenu(e, idx);
+        }
+      } else {
+        // 右键空白区域：显示菜单用于新建
+        _noteContextIdx = -1;
+        wsNoteContextMenu.style.display = 'block';
+        wsNoteContextMenu.style.left = Math.min(e.clientX, window.innerWidth - 155) + 'px';
+        wsNoteContextMenu.style.top = Math.min(e.clientY, window.innerHeight - 120) + 'px';
       }
     });
 
@@ -169,6 +175,7 @@
         var action = el.getAttribute('data-action');
         var idx = _noteContextIdx;
         hideNoteContextMenu();
+        if (action === 'note-create') { createNotepad(); return; }
         if (idx < 0 || idx >= _notepadList.length) return;
         if (action === 'note-send-ai') sendNotepadToAI(idx);
       if (action === 'note-rename') renameNotepad(idx);
