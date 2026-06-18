@@ -193,6 +193,6 @@
     // 导出到全局，供 _chat_overlay.js 的 ws.onopen 调用
     window.autoActivateObsVault = autoActivateObsVault;
     window._refreshVaultTree = _refreshVaultTree;
-    // 通过事件总线注册树刷新（3 秒去抖）
-    window._registerVaultHandler('tree', function() { _refreshVaultTree(); }, 3000);
+    // 通过事件总线注册树刷新（无防抖）
+    window._registerVaultHandler('tree', function() { _refreshVaultTree(); }, 0);
     console.log('[ObsVault] autoActivateObsVault / _refreshVaultTree exported to window');
