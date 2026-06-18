@@ -178,6 +178,12 @@
                 item.setAttribute('data-todo-done', wasDone ? 'true' : 'false');
               } else {
                 _refreshTodoCount();
+                // 切换成功后重新扫描列表，避免事件总线触发的扫描读到脏数据
+                // 用 500ms 去抖合并快速连续切换
+                if (window._todoRefreshTimer) clearTimeout(window._todoRefreshTimer);
+                window._todoRefreshTimer = setTimeout(function() {
+                  refreshTodoList();
+                }, 500);
               }
             };
             ws.send(JSON.stringify({ jsonrpc: '2.0', id: toId, method: 'obsidian.toggle_todo', params: { line: line, done: newDone } }));
