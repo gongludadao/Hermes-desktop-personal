@@ -481,10 +481,14 @@
         expandPanel();
       }
 
+      // ✅ 统一路径分隔符，避免反斜杠/正斜杠导致同一文件匹配失败
+      var normFilePath = filePath ? filePath.replace(/\\/g, '/') : null;
+
       // ✅ 统一检查是否已有相同内容的标签
       var existingTab = _editorTabs.find(function(t) {
+        var tNormPath = t.filePath ? t.filePath.replace(/\\/g, '/') : null;
         // 1. 文件路径匹配
-        if (filePath && t.filePath === filePath) return true;
+        if (normFilePath && tNormPath && normFilePath === tNormPath) return true;
         // 2. 笔记ID匹配
         if (noteId && t.noteId === noteId) return true;
         // 3. RPC调用匹配

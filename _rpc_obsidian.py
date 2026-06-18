@@ -38,40 +38,43 @@ class _VaultWatcher:
             from watchdog.events import FileSystemEventHandler
 
             class _Handler(FileSystemEventHandler):
+                """按文件路径独立防抖：同一文件短时间连续变化合并为一次推送，不同文件互不干扰
+                前端 _event_bus.js 已有各模块独立防抖，后端仅做最小合并避免重复推送"""
                 def __init__(self, watcher: "_VaultWatcher"):
                     self.watcher = watcher
-                    import time as _time
-                    self._last_push = 0
-                def _debounce(self):
-                    """检查是否去抖，返回 True 表示可以推送"""
-                    import time as _time
-                    now = _time.time()
-                    if now - self._last_push < 2.0:
-                        return False
-                    self._last_push = now
-                    return True
-                def _push_path(self, path: str, event_type: str = "unknown"):
-                    """统一推送 vault_changed 事件（带去抖和临时文件过滤）"""
-                    if not self._debounce():
-                        return
+                    self._timers = {}          # path -> Timer
+                    self._lock = __import__('threading').Lock()
+                def _schedule_push(self, path: str):
                     src = path.replace("\\", "/")
                     name = os.path.basename(src)
                     if name.startswith(".") or name.endswith((".tmp", ".swp")):
                         return
+                    with self._lock:
+                        # 取消该文件之前的定时器，重置为 trailing edge
+                        old = self._timers.get(src)
+                        if old is not None:
+                            old.cancel()
+                        t = __import__('threading').Timer(0.1, self._do_push, args=(src,))
+                        t.daemon = True
+                        self._timers[src] = t
+                        t.start()
+                def _do_push(self, src):
+                    with self._lock:
+                        self._timers.pop(src, None)
                     with self.watcher._lock:
                         self.watcher._version += 1
                     _broadcast.push_event("obsidian.vault_changed", {"version": self.watcher._version, "src_path": src})
                 def on_created(self, e):
-                    self._push_path(e.src_path, "created")
+                    self._schedule_push(e.src_path)
                 def on_deleted(self, e):
-                    self._push_path(e.src_path, "deleted")
+                    self._schedule_push(e.src_path)
                 def on_moved(self, e):
                     # 原子写入（Obsidian）：写临时文件 → 重命名为目标文件
                     # 此时 src_path 是临时文件，dest_path 才是真正的文件
                     if e.dest_path:
-                        self._push_path(e.dest_path, "moved")
+                        self._schedule_push(e.dest_path)
                 def on_modified(self, e):
-                    self._push_path(e.src_path, "modified")
+                    self._schedule_push(e.src_path)
 
             self._observer = Observer()
             self._observer.schedule(_Handler(self), native_path, recursive=True)
@@ -259,7 +262,7 @@ def register(gw):
         if not todo_file:
             return gw._ok(rid, {"todos": [], "todo_relpath": None})
         todos = []
-        abs_path = str(todo_file.resolve())
+        abs_path = str(todo_file.resolve()).replace("\\", "/")
         try:
             content = todo_file.read_text("utf-8", errors="replace")
         except Exception:
@@ -319,10 +322,6 @@ def register(gw):
             return gw._ok(rid, {"changed": False})
         lines[line_no - 1] = new
         todo_file.write_text("\n".join(lines), "utf-8")
-        # 手动触发 vault_changed 事件（watchdog 可能因去抖错过）
-        with _vault_watcher._lock:
-            _vault_watcher._version += 1
-        _broadcast.push_event("obsidian.vault_changed", {"version": _vault_watcher._version, "src_path": str(todo_file.resolve()).replace("\\", "/")})
         return gw._ok(rid, {"changed": True})
 
     def _obsidian_add_todo(rid, params):
