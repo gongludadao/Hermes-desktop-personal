@@ -145,6 +145,7 @@
           expandedPaths.push(p);
         }
       }
+      console.log('[ObsVault] saving expanded paths:', expandedPaths.length, expandedPaths);
       var tempDiv = document.createElement('div');
       obsTreeContainers = {};
       var lid = String(++msgId);
@@ -152,6 +153,7 @@
         if (result.error) return;
         renderTree(result.items || [], tempDiv, obsRoot, 0, obsTreeContainers, 'obsidian.list_files');
         wsObsTree.replaceChildren.apply(wsObsTree, tempDiv.children);
+        console.log('[ObsVault] tree rendered, restoring expanded paths...');
         // 恢复展开状态（用离线加载避免闪烁）
         var idx = 0;
         function _findObsRow(p) {
@@ -162,11 +164,16 @@
           return null;
         }
         function expandNext() {
-          if (idx >= expandedPaths.length) return;
+          if (idx >= expandedPaths.length) {
+            console.log('[ObsVault] all paths restored');
+            return;
+          }
           var tp = expandedPaths[idx++];
           var row = _findObsRow(tp);
           var entry = obsTreeContainers[tp];
-          if (!row || !entry || entry.container.style.display !== 'none') { expandNext(); return; }
+          console.log('[ObsVault] restoring path:', tp, 'row found:', !!row, 'entry found:', !!entry);
+          if (!row || !entry) { expandNext(); return; }
+          if (entry.container.style.display !== 'none') { expandNext(); return; }
           entry.container.style.display = 'block';
           var iconSpan = row.querySelector('span');
           if (iconSpan) iconSpan.textContent = '\ud83d\udcc2';
