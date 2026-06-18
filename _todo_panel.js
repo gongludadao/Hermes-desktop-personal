@@ -247,7 +247,10 @@
     }
 
     // 通过事件总线注册待办刷新（2 秒去抖）
-    window._registerVaultHandler('todo', function() { refreshTodoList(); }, 2000);
+    window._registerVaultHandler('todo', function(payload) {
+      console.log('[TodoPanel] vault_changed received, refreshing...');
+      refreshTodoList();
+    }, 2000);
 
     // 等待侧边栏就绪后初始化
     var _todoWsCheck = setInterval(function() {

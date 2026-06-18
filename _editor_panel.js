@@ -711,9 +711,16 @@
             var line = lines[i];
             // 匹配 - [ ] text 或 - [x] text
             var m = line.match(/^\s*-\s+\[[ xX]\]\s+(.+)$/);
-            if (m && m[1].trim() === todoText) {
-              targetLine = i + 1; // 行号从1开始
-              break;
+            if (m) {
+              // 去掉 markdown 标记后与 DOM 文本比较
+              var lineText = m[1].trim()
+                .replace(/\*\*([^*]+)\*\*/g, '$1')
+                .replace(/\*([^*]+)\*/g, '$1')
+                .replace(/`([^`]+)`/g, '$1');
+              if (lineText === todoText) {
+                targetLine = i + 1; // 行号从1开始
+                break;
+              }
             }
           }
           
@@ -729,26 +736,11 @@
               console.error('[TodoClick] toggle failed:', result.error);
               return;
             }
-            // 切换成功，刷新预览
-            if (typeof currentFilePath !== 'undefined' && currentFilePath) {
-              var refreshId = String(++msgId);
-              _rpcCallbacks[refreshId] = function(r) {
-                if (r.error || !r.content) return;
-                currentFileContent = r.content;
-                // 更新标签缓存
-                if (_activeTabId) {
-                  var tab = _editorTabs.find(function(t) { return t.id === _activeTabId; });
-                  if (tab) tab.content = r.content;
-                }
-                // 重新渲染预览
-                renderPreview(r.content, 'md', currentFilePath);
-              };
-              ws.send(JSON.stringify({
-                jsonrpc: '2.0',
-                id: refreshId,
-                method: 'fs.read_file',
-                params: { path: currentFilePath }
-              }));
+            // toggle 成功，后端会自动推送 vault_changed 事件
+            // 预览刷新由事件总线的 preview handler 处理
+            // 这里只需要处理失败情况，成功情况等待事件推送
+            if (result && result.changed === false) {
+              console.log('[TodoClick] no change needed');
             }
           };
           
@@ -2434,6 +2426,8 @@
           if (_ext2 === 'md' || _ext2 === 'markdown') {
             if (typeof renderMarkdown === 'function') {
               _pv.innerHTML = '<div style="font-family:var(--hdc-font)">' + renderMarkdown(result.content) + '</div>';
+              // 重新绑定待办点击事件
+              _bindTodoClicks(_pv, currentFilePath);
             } else {
               _pv.innerHTML = '<div style="font-family:var(--hdc-font);white-space:pre-wrap;padding:10px">' + hdcEscape(result.content) + '</div>';
             }
