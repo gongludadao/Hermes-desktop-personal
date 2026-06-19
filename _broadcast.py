@@ -21,7 +21,8 @@ def push_event(event_type: str, payload: dict = None) -> None:
         items = list(_gw._sessions.items())
         for sid, session in items:
             t = session.get("transport")
-            if t is not None:
+            # 只通过 WebSocket 推送，跳过 StdioTransport（会输出到终端）
+            if t is not None and type(t).__name__ == "WSTransport":
                 t.write({
                     "jsonrpc": "2.0",
                     "method": "event",
