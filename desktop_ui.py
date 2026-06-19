@@ -11,6 +11,7 @@ Usage:
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -258,26 +259,111 @@ def _find_hermes_python():
     return sys.executable
 
 
+def _kill_old_gateway():
+    """杀掉旧的网关进程并清理锁文件"""
+    try:
+        from hermes_constants import get_hermes_home
+        home = get_hermes_home()
+    except ImportError:
+        home = Path.home() / ".hermes"
+
+    # 从 lock/pid 文件中找到旧网关的 PID
+    pids_to_kill = set()
+    for name in ("gateway.lock", "gateway.pid"):
+        p = home / name
+        if p.exists():
+            try:
+                import json
+                record = json.loads(p.read_text(encoding="utf-8"))
+                pid = record.get("pid") if isinstance(record, dict) else None
+                if pid:
+                    pids_to_kill.add(pid)
+            except Exception:
+                pass
+
+    # 杀掉旧网关进程
+    for pid in pids_to_kill:
+        if _is_process_alive(pid):
+            print(f"[Gateway] 杀掉旧网关进程 {pid}")
+            try:
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                               capture_output=True, timeout=5)
+            except Exception:
+                pass
+
+    if pids_to_kill:
+        time.sleep(1.0)
+
+    # 清理所有锁文件
+    for name in ("gateway.lock", "gateway.pid", "gateway_state.json"):
+        p = home / name
+        if p.exists():
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+def _is_process_alive(pid: int) -> bool:
+    """检查进程是否存活"""
+    try:
+        import psutil
+        return psutil.pid_exists(pid)
+    except ImportError:
+        pass
+    # Windows 回退
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.WaitForSingleObject.restype = ctypes.c_uint
+        handle = kernel32.OpenProcess(0x100000, False, pid)  # SYNCHRONIZE
+        if not handle:
+            return False
+        alive = kernel32.WaitForSingleObject(handle, 0) == 0x102  # WAIT_TIMEOUT
+        kernel32.CloseHandle(handle)
+        return alive
+    except Exception:
+        return False
+
+
 def _start_gateway():
     global _gateway_proc
     hermes_python = _find_hermes_python()
-    try:
-        result = subprocess.run(
-            [hermes_python, "-m", "hermes_cli", "gateway", "status"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0:
-            return
-    except Exception:
-        pass
 
+    # 先杀掉旧网关并清理锁文件
+    _kill_old_gateway()
+
+    # 优先使用 hermes CLI 命令（pip install 后可用）
+    hermes_cli = shutil.which("hermes")
+    if not hermes_cli:
+        venv_hermes = HERMES_AGENT_DIR / "venv" / "Scripts" / "hermes.exe"
+        if venv_hermes.exists():
+            hermes_cli = str(venv_hermes)
+
+    if hermes_cli:
+        run_cmd = [hermes_cli, "gateway", "run", "--replace"]
+    else:
+        run_cmd = [hermes_python, "-c", "from hermes_cli.main import main; import sys; sys.argv=['hermes','gateway','run','--replace']; main()"]
+
+    print("[Gateway] 启动网关...")
     _gateway_proc = subprocess.Popen(
-        [hermes_python, "-m", "hermes_cli", "gateway", "run", "--replace"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        run_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
+
+    # 短暂等待确认进程没有立即崩溃
     time.sleep(2.0)
+    poll = _gateway_proc.poll()
+    if poll is not None:
+        stderr_out = _gateway_proc.stderr.read().decode("utf-8", errors="replace") if _gateway_proc.stderr else ""
+        print(f"[Gateway] 网关启动失败 (exit code={poll}): {stderr_out[:500]}")
+        _gateway_proc = None
+        return
+
+    print("[Gateway] 网关进程已启动")
 
 
 def _register_rpc_methods():

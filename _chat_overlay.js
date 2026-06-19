@@ -167,7 +167,7 @@
     });
     s = s.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
     s = s.replace(/^[-*] (.+)$/gm, '<li>$1</li>');
-    s = s.replace(/((?:<li>.*?<\/li>\n?)+)/g, '<ul style="margin:4px 0;padding:0 0 0 20px;line-height:1.65">$1</ul>');
+    s = s.replace(/((?:<li>.*?<\/li>\n?)+)/g, '<ul style="margin:4px 0;padding:0 0 0 20px;line-height:1.65;list-style-type:disc">$1</ul>');
 
     s = s.replace(/^---$/gm, '<hr style="border:none;border-top:1px solid var(--hdc-border);margin:4px 0">');
 
