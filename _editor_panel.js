@@ -2443,6 +2443,20 @@
       ws.send(JSON.stringify({ jsonrpc: '2.0', id: _prRid, method: 'fs.read_file', params: { path: currentFilePath } }));
     }, 500);
 
+    // vault 切换时关闭旧 vault 的文件标签
+    window._registerVaultSwitchedHandler('editor', function(payload) {
+      var oldPath = (payload.old_path || '').replace(/\\/g, '/');
+      if (!oldPath) return;
+      // 关闭所有属于旧 vault 的标签
+      var tabsToClose = _editorTabs.filter(function(t) {
+        if (!t.filePath) return false;
+        return t.filePath.replace(/\\/g, '/').indexOf(oldPath) === 0;
+      });
+      for (var i = 0; i < tabsToClose.length; i++) {
+        _removeTab(tabsToClose[i].id);
+      }
+    });
+
     // 点击其他区域时隐藏插入按钮
     document.addEventListener('mousedown', function(e) {
       if (insertBtn.contains(e.target)) return;

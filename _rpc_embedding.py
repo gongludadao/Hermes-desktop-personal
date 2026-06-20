@@ -33,6 +33,9 @@ _INDEX_CHECK_INTERVAL = 300  # 5 分钟检查一次文件变化
 # 索引内存缓存（避免每次搜索都读磁盘 + 解析 JSON）
 _index_cache = None  # {"documents": [...], "matrix": np.array, "mtime": float, "vault_path": str}
 
+# 索引文件写入锁（防止并发写入导致 JSON 损坏）
+_index_write_lock = threading.Lock()
+
 # 尝试导入 numpy（可选）
 try:
     import numpy as np
@@ -399,6 +402,274 @@ def _chunk_text(content):
     return chunks
 
 
+# 文件变更通知：收集变更文件，延迟批量增量更新索引
+_pending_file_changes = set()       # 待处理的文件路径集合
+_pending_changes_lock = threading.Lock()
+_pending_changes_timer = None       # 延迟触发的 Timer
+_PENDING_CHANGES_DELAY = 3.0       # 收集窗口（秒），3 秒内的变更合并为一次增量更新
+
+
+def notify_file_changed(src_path):
+    """watchdog 检测到文件变化时调用，收集变更并延迟触发增量索引更新
+    
+    多个文件短时间内连续变化时，会合并为一次增量更新，避免频繁重建索引。
+    """
+    global _pending_changes_timer, _index_cache
+    if not src_path or not os.path.isfile(src_path):
+        # 文件已删除，也需要更新索引（移除旧 chunk）
+        if src_path:
+            with _pending_changes_lock:
+                _pending_file_changes.add(src_path)
+        else:
+            return
+    else:
+        with _pending_changes_lock:
+            _pending_file_changes.add(src_path)
+
+    # 重置定时器（trailing edge：3 秒内无新变更才触发）
+    with _pending_changes_lock:
+        if _pending_changes_timer is not None:
+            _pending_changes_timer.cancel()
+        _pending_changes_timer = threading.Timer(_PENDING_CHANGES_DELAY, _do_pending_update)
+        _pending_changes_timer.daemon = True
+        _pending_changes_timer.start()
+
+
+def _do_pending_update():
+    """执行待处理的增量索引更新"""
+    global _index_cache, _pending_changes_timer
+    _pending_changes_timer = None
+
+    with _pending_changes_lock:
+        files = set(_pending_file_changes)
+        _pending_file_changes.clear()
+
+    if not files:
+        return
+
+    # 正在构建中，跳过（避免冲突）
+    if _index_build_status["building"]:
+        return
+
+    # 没有索引文件，无法增量更新（需要先 build_index）
+    if not _index_file.exists():
+        return
+
+    try:
+        cached_index = _load_index_file()
+        if cached_index is None:
+            return
+    except Exception:
+        return
+
+    vault_path = cached_index.get("vault_path", "")
+    if not vault_path or not os.path.isdir(vault_path):
+        return
+
+    # 验证变更文件属于当前 vault
+    vault_prefix = vault_path.replace("\\", "/").rstrip("/")
+    new_files = []
+    deleted_files = []
+    for fp in files:
+        normalized = fp.replace("\\", "/")
+        if not normalized.startswith(vault_prefix):
+            continue  # 不属于当前 vault，跳过
+        if os.path.isfile(fp):
+            new_files.append(fp)
+        else:
+            deleted_files.append(fp)
+
+    if not new_files and not deleted_files:
+        return
+
+    # 清除内存缓存，确保下次搜索读到最新索引
+    _index_cache = None
+
+    print(f"[Embedding] 文件变更触发增量更新：新增/修改 {len(new_files)} 个，删除 {len(deleted_files)} 个")
+    _start_background_update_local(vault_path, cached_index, new_files, deleted_files)
+
+
+def _start_background_update_local(vault_path, cached_index, new_files, deleted_files):
+    """后台增量更新索引（从模块级别调用，非 RPC 内部函数）"""
+    global _index_build_status
+
+    _index_build_status = {
+        "building": True,
+        "progress": 0,
+        "total": len(new_files),
+        "error": None,
+        "complete": False
+    }
+
+    def update_thread():
+        try:
+            text_extensions = ['.md', '.txt', '.json', '.py', '.js', '.ts', '.html', '.css', '.yaml', '.yml', '.xml', '.csv', '.log', '.ini', '.cfg', '.conf', '.sh', '.bat', '.ps1']
+            max_content_length = 20000
+
+            index_data = cached_index.get("index", [])
+
+            # Remove all chunks of deleted files
+            index_data = [item for item in index_data if item.get("path") not in deleted_files]
+
+            # Remove all chunks in main directory
+            index_data = [item for item in index_data if "\\main\\" not in item.get("path", "").replace('/', '\\') and not item.get("path", "").endswith("\\main")]
+
+            # Filter out new files in main directory
+            new_files_filtered = [f for f in new_files if "\\main\\" not in f.replace('/', '\\') and not f.endswith("\\main")]
+
+            # Collect new/modified files' chunks
+            texts_to_encode = []
+            chunk_metadata = []
+
+            for i, fp in enumerate(new_files_filtered):
+                try:
+                    fileName = os.path.basename(fp)
+                    file_ext = os.path.splitext(fp)[1].lower()
+
+                    content = ""
+                    if file_ext in text_extensions:
+                        try:
+                            content = Path(fp).read_text(encoding="utf-8")
+                            if len(content) > max_content_length:
+                                content = content[:max_content_length]
+                        except UnicodeDecodeError:
+                            try:
+                                content = Path(fp).read_text(encoding="gbk")
+                                if len(content) > max_content_length:
+                                    content = content[:max_content_length]
+                            except:
+                                content = ""
+                        except Exception:
+                            content = ""
+
+                    # 分块
+                    chunks = _chunk_text(content) if content else []
+
+                    try:
+                        file_mtime = os.path.getmtime(fp)
+                    except:
+                        file_mtime = 0
+
+                    if not chunks:
+                        chunks = [{"text": fileName, "charStart": 0, "charEnd": 0}]
+
+                    # 移除该文件旧的 chunk（modified files）
+                    index_data = [item for item in index_data if item.get("path") != fp]
+
+                    for chunk_idx, chunk in enumerate(chunks):
+                        combined = fileName + " " + chunk["text"]
+                        texts_to_encode.append(combined)
+                        chunk_metadata.append({
+                            "path": fp,
+                            "fileName": fileName,
+                            "fileExt": file_ext,
+                            "length": len(content),
+                            "mtime": file_mtime,
+                            "chunkIdx": chunk_idx,
+                            "chunkTotal": len(chunks),
+                            "chunkText": chunk["text"],
+                            "charStart": chunk["charStart"],
+                            "charEnd": chunk["charEnd"]
+                        })
+                except Exception as e:
+                    print(f"[Embedding] 处理变更文件失败：{fp}, {e}")
+                    continue
+
+            # Batch encode
+            if texts_to_encode:
+                print(f"[Embedding] 开始编码 {len(texts_to_encode)} 个 chunk（来自 {len(new_files_filtered)} 个变更文件）...")
+                embeddings = _compute_embedding_batch(texts_to_encode)
+
+                if embeddings:
+                    for i, meta in enumerate(chunk_metadata):
+                        index_data.append({
+                            **meta,
+                            "embedding": embeddings[i]
+                        })
+
+            # Save updated index
+            _save_index_file({
+                "vault_path": vault_path,
+                "model": _embedding_model_name,
+                "provider": "local",
+                "version": _INDEX_VERSION,
+                "count": len(index_data),
+                "chunkCount": len(index_data),
+                "index": index_data
+            })
+
+            print(f"[Embedding] 增量更新完成，共 {len(index_data)} 个 chunk")
+            _index_build_status["building"] = False
+            _index_build_status["complete"] = True
+        except Exception as e:
+            print(f"[Embedding] 增量更新失败：{e}")
+            _index_build_status["error"] = str(e)
+            _index_build_status["building"] = False
+
+    thread = threading.Thread(target=update_thread, daemon=True)
+    thread.start()
+
+
+def _save_index_file(index_data_obj):
+    """原子写入索引文件（加锁 + 先写临时文件再重命名，防止并发写入和写入中途崩溃导致损坏）"""
+    with _index_write_lock:
+        _ensure_cache_dir()
+        tmp_file = _index_file.with_suffix(".tmp")
+        try:
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(index_data_obj, f, ensure_ascii=False)
+            # Windows 需要先删除目标文件才能 rename
+            if _index_file.exists():
+                _index_file.unlink()
+            tmp_file.rename(_index_file)
+        except Exception:
+            # 写入失败，清理临时文件
+            try:
+                tmp_file.unlink()
+            except Exception:
+                pass
+            raise
+
+
+def _load_index_file():
+    """读取索引文件，损坏时自动删除并返回 None"""
+    try:
+        with open(_index_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"[Embedding] 索引文件损坏，将删除并重建: {e}")
+        try:
+            _index_file.unlink()
+        except Exception:
+            pass
+        global _index_cache
+        _index_cache = None
+        return None
+    except Exception:
+        return None
+
+
+def reset_on_vault_switch():
+    """vault 切换时清除索引缓存和构建状态，强制新 vault 重建索引"""
+    global _index_cache, _index_build_status, _last_index_check_time, _pending_changes_timer
+    # 取消待处理的增量更新
+    with _pending_changes_lock:
+        _pending_file_changes.clear()
+        if _pending_changes_timer is not None:
+            _pending_changes_timer.cancel()
+            _pending_changes_timer = None
+    _index_cache = None
+    _index_build_status = {
+        "building": False,
+        "progress": 0,
+        "total": 0,
+        "error": None,
+        "complete": False
+    }
+    _last_index_check_time = 0
+    print("[Embedding] vault 已切换，索引缓存已清除")
+
+
 def register(gw):
     """注册 RPC 方法"""
     _ensure_cache_dir()
@@ -460,8 +731,9 @@ def register(gw):
             return gw._err(rid, 5001, "embedding model not available")
         
         try:
-            with open(_index_file, "r", encoding="utf-8") as f:
-                index_data = json.load(f)
+            index_data = _load_index_file()
+            if index_data is None:
+                return gw._ok(rid, {"results": [], "total": 0})
             
             documents = index_data.get("index", [])
             if not documents:
@@ -610,18 +882,16 @@ def register(gw):
                 _index_build_status["progress"] = len(all_files)
                 
                 # Save index
-                _ensure_cache_dir()
-                with open(_index_file, "w", encoding="utf-8") as f:
-                    json.dump({
-                        "vault_path": vault_path,
-                        "model": _embedding_model_name,
-                        "provider": "local",
-                        "version": _INDEX_VERSION,
-                        "count": len(index_data),
-                        "fileCount": len(all_files),
-                        "chunkCount": len(index_data),
-                        "index": index_data
-                    }, f, ensure_ascii=False)
+                _save_index_file({
+                    "vault_path": vault_path,
+                    "model": _embedding_model_name,
+                    "provider": "local",
+                    "version": _INDEX_VERSION,
+                    "count": len(index_data),
+                    "fileCount": len(all_files),
+                    "chunkCount": len(index_data),
+                    "index": index_data
+                })
                 
                 print(f"[Embedding] 后台构建完成，共 {len(index_data)} 个 chunk（来自 {len(all_files)} 个文件）")
                 _index_build_status["building"] = False
@@ -783,56 +1053,55 @@ def register(gw):
         # Check if index already exists
         if _index_file.exists():
             try:
-                with open(_index_file, "r", encoding="utf-8") as f:
-                    cached_index = json.load(f)
-                
-                # 检查索引版本，不匹配则强制重建
-                cached_version = cached_index.get("version", 1)
-                if cached_version != _INDEX_VERSION:
-                    print(f"[Embedding] 索引版本不匹配（缓存 v{cached_version} ≠ 当前 v{_INDEX_VERSION}），强制重建...")
-                    _start_background_build(vault_path, all_files)
-                    return gw._ok(rid, {
-                        "status": "building",
-                        "total": len(all_files),
-                        "reason": "index version mismatch, rebuilding"
-                    })
-                
-                # Check if vault path and model match
-                if cached_index.get("vault_path") == vault_path and cached_index.get("model") == _embedding_model_name:
-                    cached_files = set(item.get("path") for item in cached_index.get("index", []))
-                    current_files = set(all_files)
-                    new_files = current_files - cached_files
-                    deleted_files = cached_files - current_files
-                    
-                    # Check for modified files
-                    modified_files = []
-                    cached_index_map = {item.get("path"): item for item in cached_index.get("index", [])}
-                    for fp in current_files:
-                        if fp in cached_index_map:
-                            try:
-                                current_mtime = os.path.getmtime(fp)
-                                cached_mtime = cached_index_map[fp].get("mtime", 0)
-                                if current_mtime > cached_mtime:
-                                    modified_files.append(fp)
-                            except:
-                                pass
-                    
-                    if len(new_files) == 0 and len(deleted_files) == 0 and len(modified_files) == 0:
-                        print(f"[Embedding] 索引无变化，直接加载（{cached_index.get('count', 0)} 个文件）")
+                cached_index = _load_index_file()
+                if cached_index is not None:
+                    # 检查索引版本，不匹配则强制重建
+                    cached_version = cached_index.get("version", 1)
+                    if cached_version != _INDEX_VERSION:
+                        print(f"[Embedding] 索引版本不匹配（缓存 v{cached_version} ≠ 当前 v{_INDEX_VERSION}），强制重建...")
+                        _start_background_build(vault_path, all_files)
                         return gw._ok(rid, {
-                            "count": cached_index.get("count", 0),
-                            "index_file": str(_index_file),
-                            "loaded_from_cache": True
+                            "status": "building",
+                            "total": len(all_files),
+                            "reason": "index version mismatch, rebuilding"
                         })
                     
-                    print(f"[Embedding] 发现文件变化：新增 {len(new_files)} 个，删除 {len(deleted_files)} 个，修改 {len(modified_files)} 个，后台更新...")
-                    all_new_files = list(new_files) + modified_files
-                    _start_background_update(vault_path, cached_index, all_new_files, deleted_files)
-                    return gw._ok(rid, {
-                        "status": "updating",
-                        "new_files": len(new_files),
-                        "deleted_files": len(deleted_files)
-                    })
+                    # Check if vault path and model match
+                    if cached_index.get("vault_path") == vault_path and cached_index.get("model") == _embedding_model_name:
+                        cached_files = set(item.get("path") for item in cached_index.get("index", []))
+                        current_files = set(all_files)
+                        new_files = current_files - cached_files
+                        deleted_files = cached_files - current_files
+                        
+                        # Check for modified files
+                        modified_files = []
+                        cached_index_map = {item.get("path"): item for item in cached_index.get("index", [])}
+                        for fp in current_files:
+                            if fp in cached_index_map:
+                                try:
+                                    current_mtime = os.path.getmtime(fp)
+                                    cached_mtime = cached_index_map[fp].get("mtime", 0)
+                                    if current_mtime > cached_mtime:
+                                        modified_files.append(fp)
+                                except:
+                                    pass
+                        
+                        if len(new_files) == 0 and len(deleted_files) == 0 and len(modified_files) == 0:
+                            print(f"[Embedding] 索引无变化，直接加载（{cached_index.get('count', 0)} 个文件）")
+                            return gw._ok(rid, {
+                                "count": cached_index.get("count", 0),
+                                "index_file": str(_index_file),
+                                "loaded_from_cache": True
+                            })
+                        
+                        print(f"[Embedding] 发现文件变化：新增 {len(new_files)} 个，删除 {len(deleted_files)} 个，修改 {len(modified_files)} 个，后台更新...")
+                        all_new_files = list(new_files) + modified_files
+                        _start_background_update(vault_path, cached_index, all_new_files, deleted_files)
+                        return gw._ok(rid, {
+                            "status": "updating",
+                            "new_files": len(new_files),
+                            "deleted_files": len(deleted_files)
+                        })
             except Exception as e:
                 print(f"[Embedding] 加载缓存索引失败：{e}，将后台重新构建")
         
@@ -857,8 +1126,9 @@ def register(gw):
         _last_index_check_time = now
         
         try:
-            with open(_index_file, "r", encoding="utf-8") as f:
-                cached_index = json.load(f)
+            cached_index = _load_index_file()
+            if cached_index is None:
+                return
             vault_path = cached_index.get("vault_path", "")
             if not vault_path or not os.path.isdir(vault_path):
                 return
@@ -922,8 +1192,9 @@ def register(gw):
         
         # 重新加载
         try:
-            with open(_index_file, "r", encoding="utf-8") as f:
-                index_data = json.load(f)
+            index_data = _load_index_file()
+            if index_data is None:
+                return gw._ok(rid, {"results": [], "total": 0})
             documents = index_data.get("index", [])
             if not documents:
                 _index_cache = None
@@ -1035,11 +1306,193 @@ def register(gw):
         """获取索引构建状态"""
         return gw._ok(rid, _index_build_status)
 
+    def _embedding_query_index_with_context(rid, params):
+        """上下文感知向量搜索：接收多条消息，分别计算 embedding 后加权融合，再搜索索引
+        
+        params:
+          - messages: [str] 消息列表，最后一条是当前消息（权重最高）
+          - weights: [float] 可选，每条消息的权重，默认自动递减
+          - top_k: int 可选，返回结果数量
+        """
+        messages = params.get("messages", [])
+        weights = params.get("weights", None)
+        top_k = params.get("top_k", 5)
+
+        if not messages:
+            return gw._err(rid, 4000, "messages required")
+
+        if _model_loading:
+            return gw._err(rid, 5002, "model loading, please wait")
+
+        if not _index_file.exists():
+            return gw._err(rid, 4004, "index not built, please call embedding.build_index first")
+
+        # 搜索前检查索引是否过期
+        _maybe_refresh_index()
+
+        # 批量计算所有消息的 embedding
+        embeddings = _compute_embedding_batch(messages)
+        if embeddings is None:
+            return gw._err(rid, 5001, "embedding model not available")
+
+        # 权重：默认递减，最后一条（当前消息）权重最高
+        n = len(messages)
+        if weights and len(weights) == n:
+            w = [float(x) for x in weights]
+        else:
+            # 默认权重：当前消息 0.5，倒数第2条 0.3，倒数第3条 0.2，更早的 0.1
+            w = []
+            for i in range(n):
+                dist_from_end = n - 1 - i  # 距离末尾的距离
+                if dist_from_end == 0:
+                    w.append(0.5)
+                elif dist_from_end == 1:
+                    w.append(0.3)
+                elif dist_from_end == 2:
+                    w.append(0.2)
+                else:
+                    w.append(0.1)
+
+        # 调试日志：显示拼接的消息和权重
+        print(f"[Embedding] 上下文感知搜索：共 {n} 条消息")
+        for i in range(n):
+            preview = messages[i][:80].replace('\n', ' ')
+            print(f"  [{i}] 权重={w[i]:.1f} | {preview}{'...' if len(messages[i]) > 80 else ''}")
+
+        # 加权融合 embedding
+        dim = len(embeddings[0])
+        fused = [0.0] * dim
+        for i, emb in enumerate(embeddings):
+            wi = w[i]
+            for j in range(dim):
+                fused[j] += wi * emb[j]
+
+        # 归一化融合向量
+        norm = sum(x * x for x in fused) ** 0.5
+        if norm > 0:
+            fused = [x / norm for x in fused]
+
+        try:
+            cache = _get_index_in_memory()
+            if cache is None:
+                return gw._ok(rid, {"results": [], "total": 0})
+
+            documents = cache["documents"]
+            matrix = cache["matrix"]
+
+            # 用融合向量搜索
+            if matrix is not None and _numpy_available and np is not None:
+                q = np.array(fused, dtype=np.float32)
+                # fused 已经归一化，matrix 也已归一化，直接点积
+                similarities = matrix @ q
+            else:
+                similarities = [_cosine_similarity(fused, doc.get("embedding", [])) for doc in documents]
+
+            # 构建结果并排序
+            all_results = []
+            for i, doc in enumerate(documents):
+                sim = float(similarities[i]) if hasattr(similarities[i], '__float__') else float(similarities[i])
+                all_results.append({
+                    "path": doc.get("path", ""),
+                    "fileName": doc.get("fileName", ""),
+                    "similarity": sim,
+                    "chunkIdx": doc.get("chunkIdx", 0),
+                    "chunkTotal": doc.get("chunkTotal", 1),
+                    "chunkText": doc.get("chunkText", ""),
+                    "charStart": doc.get("charStart", 0),
+                    "charEnd": doc.get("charEnd", 0)
+                })
+
+            all_results.sort(key=lambda x: x["similarity"], reverse=True)
+
+            # 去重：同一文件最多 2 个 chunk
+            seen_files = {}
+            top_results = []
+            max_chunks_per_file = 2
+            for r in all_results:
+                fp = r["path"]
+                cnt = seen_files.get(fp, 0)
+                if cnt >= max_chunks_per_file:
+                    continue
+                seen_files[fp] = cnt + 1
+                top_results.append(r)
+                if len(top_results) >= top_k:
+                    break
+
+            return gw._ok(rid, {"results": top_results, "total": len(all_results)})
+        except Exception as e:
+            return gw._err(rid, 5000, str(e))
+
+    def _embedding_get_chunk_neighbors(rid, params):
+        """获取指定 chunk 的相邻片段（用于提供上下文）
+        
+        params:
+          - path: str 文件路径
+          - chunk_idx: int chunk 索引
+          - neighbor_count: int 可选，前后各取多少个邻居，默认 1（即总共最多 3 个片段）
+        """
+        path = params.get("path", "")
+        chunk_idx = params.get("chunk_idx", 0)
+        neighbor_count = params.get("neighbor_count", 1)
+        
+        if not path:
+            return gw._err(rid, 4000, "path required")
+        
+        try:
+            cache = _get_index_in_memory()
+            if cache is None:
+                return gw._ok(rid, {"chunks": []})
+            
+            documents = cache["documents"]
+            
+            # 找到该文件的所有 chunks，按 chunkIdx 排序
+            file_chunks = [d for d in documents if d.get("path") == path]
+            file_chunks.sort(key=lambda x: x.get("chunkIdx", 0))
+            
+            if not file_chunks:
+                return gw._ok(rid, {"chunks": []})
+            
+            # 找到目标 chunk 在列表中的位置
+            target_idx = -1
+            for i, c in enumerate(file_chunks):
+                if c.get("chunkIdx") == chunk_idx:
+                    target_idx = i
+                    break
+            
+            if target_idx == -1:
+                # 找不到指定 chunk，返回空
+                return gw._ok(rid, {"chunks": []})
+            
+            # 计算要取的 chunk 范围
+            start_idx = max(0, target_idx - neighbor_count)
+            end_idx = min(len(file_chunks), target_idx + neighbor_count + 1)
+            
+            # 提取结果
+            result_chunks = []
+            for i in range(start_idx, end_idx):
+                c = file_chunks[i]
+                result_chunks.append({
+                    "path": c.get("path", ""),
+                    "fileName": c.get("fileName", ""),
+                    "chunkIdx": c.get("chunkIdx", 0),
+                    "chunkTotal": c.get("chunkTotal", 1),
+                    "chunkText": c.get("chunkText", ""),
+                    "charStart": c.get("charStart", 0),
+                    "charEnd": c.get("charEnd", 0),
+                    "isTarget": (i == target_idx)  # 标记是否是目标 chunk
+                })
+            
+            return gw._ok(rid, {"chunks": result_chunks, "count": len(result_chunks)})
+        except Exception as e:
+            return gw._err(rid, 5000, str(e))
+
     gw._methods["embedding.compute"] = _embedding_compute
     gw._methods["embedding.similarity"] = _embedding_similarity
     gw._methods["embedding.search"] = _embedding_search
     gw._methods["embedding.build_index"] = _embedding_build_index
     gw._methods["embedding.query_index"] = _embedding_query_index
+    gw._methods["embedding.query_index_with_context"] = _embedding_query_index_with_context
+    gw._methods["embedding.get_chunk_neighbors"] = _embedding_get_chunk_neighbors
     gw._methods["embedding.status"] = _embedding_status
     
     print("[Embedding] RPC 方法已注册")

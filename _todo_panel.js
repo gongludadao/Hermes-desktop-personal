@@ -151,7 +151,7 @@
           var rowStyle = t.done ? 'opacity:0.5' : '';
           html += '<div data-todo-abs-path="' + hdcEscape(t.absPath) + '" data-todo-line="' + t.line + '" data-todo-done="' + t.done + '" data-todo-text="' + hdcEscape(t.text) + '" style="display:flex;align-items:flex-start;gap:3px;padding:2px 4px;border-radius:3px;cursor:pointer;' + rowStyle + '" onmouseover="this.style.background=\'var(--hdc-muted)\'" onmouseout="this.style.background=\'transparent\'">' +
             '<input type="checkbox" ' + checked + ' style="margin-top:2px;flex-shrink:0;cursor:pointer;accent-color:var(--hdc-accent)">' +
-            '<span style="flex:1;font-size:11px;line-height:1.4;color:var(--hdc-fg);word-break:break-all">' + hdcEscape(t.text) + '</span>' +
+            '<span style="flex:1;font-size:11px;line-height:1.4;color:var(--hdc-fg);word-break:break-all">' + (typeof renderMarkdown === 'function' ? renderMarkdown(t.text) : hdcEscape(t.text)) + '</span>' +
             '</div>';
         }
         listEl.innerHTML = html;
@@ -250,6 +250,12 @@
     window._registerVaultHandler('todo', function(payload) {
       refreshTodoList();
     }, 0);
+
+    // vault 切换时刷新待办列表
+    window._registerVaultSwitchedHandler('todo', function(payload) {
+      _todoVaultPath = null; // 清除旧路径缓存
+      refreshTodoList();
+    });
 
     // 等待侧边栏就绪后初始化
     var _todoWsCheck = setInterval(function() {

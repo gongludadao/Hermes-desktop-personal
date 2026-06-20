@@ -384,6 +384,10 @@
       _ctn = _ctn || _treeContainers;
       _rpc = _rpc || 'fs.list_dir';
       container.innerHTML = '';
+      // 过滤掉以 . 开头的隐藏文件和文件夹
+      items = items.filter(function(item) {
+        return item.name && item.name.charAt(0) !== '.';
+      });
       for (var i = 0; i < items.length; i++) {
         var item = items[i];
         var pad = 8 + depth * 14;

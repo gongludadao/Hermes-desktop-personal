@@ -64,6 +64,12 @@ class _VaultWatcher:
                     with self.watcher._lock:
                         self.watcher._version += 1
                     _broadcast.push_event("obsidian.vault_changed", {"version": self.watcher._version, "src_path": src})
+                    # 通知 embedding 模块做增量索引更新
+                    try:
+                        import _rpc_embedding
+                        _rpc_embedding.notify_file_changed(src)
+                    except Exception:
+                        pass
                 def on_created(self, e):
                     self._schedule_push(e.src_path)
                 def on_deleted(self, e):
@@ -129,6 +135,15 @@ def register(gw):
         if not os.path.isdir(path):
             return gw._err(rid, 4004, f"directory not found: {path}")
         try:
+            # 获取旧 vault 路径（用于前端关闭旧标签等）
+            old_path = None
+            if _OBSIDIAN_CONFIG.exists():
+                try:
+                    old_config = json.loads(_OBSIDIAN_CONFIG.read_text(encoding="utf-8"))
+                    old_path = old_config.get("active_vault")
+                except Exception:
+                    pass
+
             _OBSIDIAN_CONFIG.parent.mkdir(parents=True, exist_ok=True)
             config = json.loads(_OBSIDIAN_CONFIG.read_text(encoding="utf-8"))
             config["active_vault"] = path
@@ -136,6 +151,16 @@ def register(gw):
             with open(_OBSIDIAN_CONFIG, "w", encoding="utf-8") as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
             _vault_watcher.start_watching(path)
+
+            # 清除 embedding 索引缓存，强制新 vault 重建索引
+            try:
+                import _rpc_embedding
+                _rpc_embedding.reset_on_vault_switch()
+            except Exception:
+                pass
+
+            # 推送 vault_switched 事件，通知前端各模块刷新
+            _broadcast.push_event("obsidian.vault_switched", {"path": path, "old_path": old_path})
             return gw._ok(rid, {"success": True, "path": path})
         except Exception as e:
             return gw._err(rid, 5000, str(e))

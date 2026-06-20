@@ -1308,6 +1308,17 @@
             }
             break;
 
+          case 'obsidian.vault_switched':
+            console.log('[Overlay] obsidian.vault_switched event received, path:', p.path);
+            // 重置 embedding 索引标志
+            _embeddingIndexBuilt = false;
+            updateStatusDisplay();
+            // 通过事件总线分发给各注册模块
+            if (typeof window._dispatchVaultSwitched === 'function') {
+              window._dispatchVaultSwitched(p);
+            }
+            break;
+
           case 'project.file_changed':
             // 前端去抖：3 秒内不重复刷新
             if (window._lastTreeRefresh && Date.now() - window._lastTreeRefresh < 3000) {
@@ -2007,9 +2018,33 @@
 
   // ── 语义搜索（Embedding）──────────────────────────────────────────
   
-  // 语义搜索：只使用向量搜索，返回匹配的 chunk 片段
+  // 从聊天界面提取最近 N 条用户消息文本（剥离附件内容，只保留用户原始意图）
+  function _getRecentUserMessages(count) {
+    var messages = [];
+    if (!msgsEl) return messages;
+    var userMsgs = msgsEl.querySelectorAll('.hdc-msg-user');
+    // 从最后一条开始取
+    for (var i = userMsgs.length - 1; i >= 0 && messages.length < count; i--) {
+      var text = (userMsgs[i].textContent || '').trim();
+      if (!text || text.length < 2) continue;
+      // 剥离附件内容：截断到附件标记之前
+      var attachIdx = text.indexOf('The user has attached the following content');
+      if (attachIdx < 0) attachIdx = text.indexOf('用户已在此消息中直接附加');
+      if (attachIdx > 0) text = text.substring(0, attachIdx).trim();
+      // 剥离附件标记（如 📚 引用了《xxx》、[N个附件]）
+      text = text.replace(/\s*📚\s*引用了[^]*/, '');
+      text = text.replace(/\s*\[[\d]+个?附件\]/, '');
+      text = text.trim();
+      if (text && text.length >= 2) {
+        messages.unshift(text);
+      }
+    }
+    return messages;
+  }
+
+  // 语义搜索：使用上下文感知向量搜索（多消息 embedding 加权融合）
   function searchSemantic(filePaths, originalQuery, onDone) {
-    console.log('[AutoKB] Semantic: 开始语义搜索...');
+    console.log('[AutoKB] Semantic: 开始上下文感知语义搜索...');
     console.log('[AutoKB] Semantic: 原始查询:', originalQuery);
     
     // 如果向量索引不可用，不进行搜索
@@ -2020,13 +2055,66 @@
       return;
     }
     
-    // 向量搜索（使用原始查询，语义搜索需要完整句子）
-    searchEmbeddingIndex(originalQuery, function(results) {
-      if (!results || results.length === 0) {
+    // 收集最近20条用户消息作为上下文
+    var recentMessages = _getRecentUserMessages(20);
+    // 构建搜索消息列表：[历史消息..., 当前消息]
+    // 当前消息放最后（权重最高）
+    var contextMessages = [];
+    for (var i = 0; i < recentMessages.length; i++) {
+      // 跳过和当前消息相同的（避免重复）
+      if (recentMessages[i] !== originalQuery) {
+        contextMessages.push(recentMessages[i]);
+      }
+    }
+    contextMessages.push(originalQuery);  // 当前消息放最后
+    
+    console.log('[AutoKB] Semantic: 上下文消息数:', contextMessages.length, '(含当前消息，最多20条)');
+    
+    // 计算权重：当前消息最高，历史消息按距离递减
+    // 权重设计：当前0.35，然后0.2, 0.15, 0.1, 0.08, 0.05, 0.04, 0.03... 递减
+    var weights = [];
+    var n = contextMessages.length;
+    for (var i = 0; i < n; i++) {
+      var distFromEnd = n - 1 - i;  // 距离末尾的距离
+      var w;
+      if (distFromEnd === 0) {
+        w = 0.35;  // 当前消息
+      } else if (distFromEnd === 1) {
+        w = 0.20;  // 前一条
+      } else if (distFromEnd === 2) {
+        w = 0.15;  // 前两条
+      } else if (distFromEnd === 3) {
+        w = 0.10;  // 前三条
+      } else if (distFromEnd === 4) {
+        w = 0.08;  // 前四条
+      } else if (distFromEnd === 5) {
+        w = 0.05;  // 前五条
+      } else {
+        // 更早的消息权重快速衰减
+        w = Math.max(0.01, 0.05 - (distFromEnd - 5) * 0.005);
+      }
+      weights.push(w);
+    }
+    
+    // 使用上下文感知搜索（多消息 embedding 加权融合）
+    var processedMessages = [];
+    for (var i = 0; i < contextMessages.length; i++) {
+      processedMessages.push(preprocessQuery(contextMessages[i]));
+    }
+    
+    rpcCall('embedding.query_index_with_context', { messages: processedMessages, weights: weights, top_k: _autoKbMaxFiles }, function(r) {
+      if (r.error) {
+        console.log('[AutoKB] Semantic: 上下文搜索失败', r.error.message || r.error);
+        onDone([]);
+        return;
+      }
+      var results = r.results || [];
+      if (results.length === 0) {
         console.log('[AutoKB] Semantic: 无匹配结果');
         onDone([]);
         return;
       }
+      console.log('[AutoKB] Semantic: 上下文搜索结果', results.length, '个');
       
       // 过滤低相似度结果（使用相对阈值）
       var MIN_SIMILARITY = 0.55;  // 最低绝对相似度阈值（提高，避免短查询误触发）
@@ -2079,7 +2167,7 @@
   }
 
   function listDirRecursive(dirPath, onDone, maxDepth) {
-    maxDepth = maxDepth || 3; // 限制搜索深度，避免搜索整个 vault
+    // 不限制搜索深度，允许遍历整个 vault
     // 统一路径格式为 / 格式
     dirPath = dirPath.replace(/\\/g, '/');
     var allFiles = [];
@@ -2273,70 +2361,87 @@
           }
         }
         
-        // 如果使用了新的返回格式（包含 chunks），合并同一文件的所有信息
-        var uniqueFiles = {};
+        // 为每个匹配片段获取相邻片段（提供上下文）
+        // 每个匹配点独立处理，不跨匹配点合并，避免远距离片段混在一起
+        var neighborPromises = [];
+        var neighborCount = 1; // 前后各取1个邻居，总共最多3个片段
+        
         for (var i = 0; i < filesToRead.length; i++) {
-          var chunk = filesToRead[i];
-          var path = chunk.path;
-          if (!uniqueFiles[path]) {
-            uniqueFiles[path] = chunk;
-            console.log('[AutoKB] 将读取完整文件:', path, '(匹配到', chunk.chunkCount || 1, '个相关片段)');
-          }
+          (function(chunk, idx) {
+            var promise = new Promise(function(resolve, reject) {
+              rpcCall('embedding.get_chunk_neighbors', {
+                path: chunk.path,
+                chunk_idx: chunk.chunkIdx || 0,
+                neighbor_count: neighborCount
+              }, function(r) {
+                if (r.error) {
+                  console.log('[AutoKB] 获取相邻片段失败:', chunk.path, r.error.message);
+                  // 失败时只返回原始片段
+                  resolve({
+                    matchIndex: idx,
+                    chunk: chunk,
+                    neighbors: [chunk]
+                  });
+                } else {
+                  var neighbors = r.chunks || [];
+                  console.log('[AutoKB] 获取相邻片段:', chunk.fileName, '目标片段', chunk.chunkIdx, '+', neighbors.length - 1, '个邻居');
+                  resolve({
+                    matchIndex: idx,
+                    chunk: chunk,
+                    neighbors: neighbors
+                  });
+                }
+              });
+            });
+            neighborPromises.push(promise);
+          })(filesToRead[i], i);
         }
         
-        // 读取所有文件的完整内容并构建附件
-        var readCount = Object.keys(uniqueFiles).length;
-        var attachmentsBuilt = [];
-        
-        for (var path in uniqueFiles) {
-          var chunk = uniqueFiles[path];
+        // 等待所有相邻片段获取完成
+        Promise.all(neighborPromises).then(function(allResults) {
+          var attachmentsBuilt = [];
+          var totalChunks = 0;
           
-          // 检查是否有完整的 chunkText，如果没有则需要读取文件
-          if (chunk.content && chunk.chunkTotal === 1) {
-            // 单 chunk 文件且已有内容，直接使用
-            var name = chunk.fileName || (chunk.path.split(/[\\/]/).pop() || chunk.path);
+          // 每个匹配点独立成一个附件
+          for (var i = 0; i < allResults.length; i++) {
+            var result = allResults[i];
+            var neighbors = result.neighbors;
+            var targetChunk = result.chunk;
+            
+            if (neighbors.length === 0) continue;
+            
+            totalChunks += neighbors.length;
+            
+            // 按 chunkIdx 排序
+            neighbors.sort(function(a, b) { return a.chunkIdx - b.chunkIdx; });
+            
+            // 构建内容
+            var name = targetChunk.fileName || (targetChunk.path.split(/[\\/]/).pop() || targetChunk.path);
+            var combinedContent = neighbors.map(function(c) {
+              var isTarget = c.chunkIdx === targetChunk.chunkIdx;
+              var marker = isTarget ? '【匹配片段】' : '【上下文】';
+              return marker + ' 片段 ' + (c.chunkIdx + 1) + '/' + c.chunkTotal + ' (位置: ' + (c.charStart || 0) + '-' + (c.charEnd || 0) + ')\n' + (c.chunkText || c.content || '');
+            }).join('\n\n---\n\n');
+            
             attachmentsBuilt.push({
               type: 'snippet',
-              fileName: name,
-              filePath: path,
-              content: chunk.content,
+              fileName: name + ' (片段' + (targetChunk.chunkIdx + 1) + '附近, ' + neighbors.length + '个片段)',
+              filePath: targetChunk.path,
+              content: combinedContent,
               lang: 'markdown'
             });
             quotedNames.push(name.replace(/\.md$/i, ''));
-          } else {
-            // 多 chunk 或无内容，读取完整文件
-            rpcCall('fs.read_file', { path: path }, function(r) {
-              if (r.error) {
-                console.log('[AutoKB] 读取文件失败:', path, r.error.message);
-                return;
-              }
-              
-              var name = chunk.fileName || (path.split(/[\\/]/).pop() || path);
-              attachmentsBuilt.push({
-                type: 'snippet',
-                fileName: name + ' (' + (chunk.chunkCount || 'full') + ')',
-                filePath: path,
-                content: r.content,
-                lang: 'markdown'
-              });
-              quotedNames.push(name.replace(/\.md$/i, ''));
-              
-              // 所有文件读取完成后发送
-              if (attachmentsBuilt.length >= readCount) {
-                if (statusEl) statusEl.textContent = '已注入 ' + attachmentsBuilt.length + ' 个相关文件';
-                _doSendInternal(text, attachmentsBuilt, Array.from(new Set(quotedNames)));
-              }
-            });
+            
+            console.log('[AutoKB] 注入片段:', name, '匹配点' + (targetChunk.chunkIdx + 1), neighbors.length + '个片段(含上下文)');
           }
-        }
-        
-        // 如果没有需要异步读取的，立即发送
-        if (attachmentsBuilt.length === readCount && readCount > 0) {
-          if (statusEl) statusEl.textContent = '已注入 ' + attachmentsBuilt.length + ' 个相关文件';
-          _doSendInternal(text, attachmentsBuilt, Array.from(new Set(quotedNames)));
-        } else if (readCount === 0) {
-          _doSendInternal(text, [], []);
-        }
+          
+          if (attachmentsBuilt.length > 0) {
+            if (statusEl) statusEl.textContent = '已注入 ' + attachmentsBuilt.length + ' 个匹配点，共 ' + totalChunks + ' 个片段(含上下文)';
+            _doSendInternal(text, attachmentsBuilt, Array.from(new Set(quotedNames)));
+          } else {
+            _doSendInternal(text, [], []);
+          }
+        });
       });
       return;
     }

@@ -1,6 +1,7 @@
 // ── Event Bus Module ──
-// 统一事件分发：接收 vault_changed 事件，推送到所有注册的模块处理器
+// 统一事件分发：接收 vault_changed / vault_switched 事件，推送到所有注册的模块处理器
     var _vaultHandlers = {};
+    var _vaultSwitchedHandlers = {};
 
     /**
      * 注册 vault_changed 事件处理器
@@ -14,6 +15,15 @@
         debounce: debounceMs || 0,
         _last: 0
       };
+    };
+
+    /**
+     * 注册 vault_switched 事件处理器（vault 路径变更时触发）
+     * @param {string} key   - 唯一标识
+     * @param {function} handler - 处理器函数，接收 payload 参数
+     */
+    window._registerVaultSwitchedHandler = function(key, handler) {
+      _vaultSwitchedHandlers[key] = handler;
     };
 
     /**
@@ -31,6 +41,19 @@
           } catch(e) {
             console.error('[EventBus] handler error: ' + key, e);
           }
+        }
+      }
+    };
+
+    /**
+     * 分发 vault_switched 事件（vault 路径变更）
+     */
+    window._dispatchVaultSwitched = function(payload) {
+      for (var key in _vaultSwitchedHandlers) {
+        try {
+          _vaultSwitchedHandlers[key](payload);
+        } catch(e) {
+          console.error('[EventBus] vault_switched handler error: ' + key, e);
         }
       }
     };

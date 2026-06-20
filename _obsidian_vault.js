@@ -200,4 +200,22 @@
     window._refreshVaultTree = _refreshVaultTree;
     // 通过事件总线注册树刷新（无防抖）
     window._registerVaultHandler('tree', function() { _refreshVaultTree(); }, 0);
+    // vault 切换时更新路径并刷新文件树
+    window._registerVaultSwitchedHandler('tree', function(payload) {
+      if (payload.path) {
+        obsRoot = payload.path;
+        window._obsidianVaultPath = payload.path;
+        try { localStorage.setItem('hdc_obsidian_vault', payload.path); } catch(e) {}
+        _obsVaultActive = true;
+        // 重新构建向量索引
+        if (typeof window.buildEmbeddingIndex === 'function') {
+          window.buildEmbeddingIndex(function(success) {
+            console.log('[ObsVault] vault 切换后向量索引重建结果:', success);
+          });
+        }
+        // 刷新文件树
+        obsTreeContainers = {};
+        loadDir(obsRoot, wsObsTree, 0, null, 'obsidian.list_files', obsTreeContainers);
+      }
+    });
     console.log('[ObsVault] autoActivateObsVault / _refreshVaultTree exported to window');
