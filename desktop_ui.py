@@ -62,7 +62,7 @@ def _ensure_web_deps():
 
 
 def _ensure_embedding_deps():
-    """检查并安装 embedding 相关依赖（numpy, sentence-transformers）"""
+    """检查并安装 embedding 相关依赖（numpy, sentence-transformers, chromadb）"""
     deps_to_install = []
     
     # 检查 numpy（只检查是否存在，不导入）
@@ -80,6 +80,22 @@ def _ensure_embedding_deps():
             deps_to_install.append("sentence-transformers")
     except ImportError:
         deps_to_install.append("sentence-transformers")
+    
+    # 检查 chromadb（向量数据库）
+    try:
+        import importlib.util
+        if importlib.util.find_spec("chromadb") is None:
+            deps_to_install.append("chromadb")
+    except ImportError:
+        deps_to_install.append("chromadb")
+    
+    # 检查 jieba（中文分词，用于关键词提取）
+    try:
+        import importlib.util
+        if importlib.util.find_spec("jieba") is None:
+            deps_to_install.append("jieba")
+    except ImportError:
+        deps_to_install.append("jieba")
     
     if deps_to_install:
         print(f"[Desktop] 缺失依赖: {deps_to_install}，正在自动安装...")
@@ -103,7 +119,7 @@ def _ensure_embedding_deps():
                 print(f"[Desktop] 依赖安装完成: {deps_to_install}")
             except subprocess.CalledProcessError as e:
                 print(f"[Desktop] 依赖安装失败: {e}")
-                print("[Desktop] 向量搜索功能将不可用，请手动安装: pip install numpy sentence-transformers")
+                print("[Desktop] 向量搜索功能将不可用，请手动安装: pip install numpy sentence-transformers chromadb")
 
 
 def _check_web_dist():

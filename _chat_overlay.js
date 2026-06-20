@@ -2035,11 +2035,20 @@
       text = text.replace(/\s*📚\s*引用了[^]*/, '');
       text = text.replace(/\s*\[[\d]+个?附件\]/, '');
       text = text.trim();
-      if (text && text.length >= 2) {
-        messages.unshift(text);
-      }
+      if (!text || text.length < 2) continue;
+      messages.unshift(text);
     }
     return messages;
+  }
+  
+  // 获取最近一条 AI 回复
+  function _getLastAiResponse() {
+    if (!msgsEl) return '';
+    var botMsgs = msgsEl.querySelectorAll('.hdc-msg-bot');
+    if (botMsgs.length === 0) return '';
+    var text = (botMsgs[botMsgs.length - 1].textContent || '').trim();
+    if (!text) return '';
+    return text.substring(0, 120);  // 取前 120 字作为上下文
   }
 
   // 语义搜索：使用上下文感知向量搜索（多消息 embedding 加权融合）
@@ -2055,46 +2064,34 @@
       return;
     }
     
-    // 收集最近20条用户消息作为上下文
-    var recentMessages = _getRecentUserMessages(20);
-    // 构建搜索消息列表：[历史消息..., 当前消息]
-    // 当前消息放最后（权重最高）
+    // 收集最近 3 条用户消息 + 1 条 AI 回复作为上下文
+    var recentMessages = _getRecentUserMessages(3);
+    var aiResponse = _getLastAiResponse();
+    
+    // 构建搜索消息列表：
+    //   [0] = 历史消息融合（其他2条各50%）
+    //   [1] = 最新用户消息 + AI 回复（各50%）
     var contextMessages = [];
+    var histParts = [];
     for (var i = 0; i < recentMessages.length; i++) {
-      // 跳过和当前消息相同的（避免重复）
       if (recentMessages[i] !== originalQuery) {
-        contextMessages.push(recentMessages[i]);
+        histParts.push(recentMessages[i]);
       }
     }
-    contextMessages.push(originalQuery);  // 当前消息放最后
-    
-    console.log('[AutoKB] Semantic: 上下文消息数:', contextMessages.length, '(含当前消息，最多20条)');
-    
-    // 计算权重：当前消息最高，历史消息按距离递减
-    // 权重设计：当前0.35，然后0.2, 0.15, 0.1, 0.08, 0.05, 0.04, 0.03... 递减
-    var weights = [];
-    var n = contextMessages.length;
-    for (var i = 0; i < n; i++) {
-      var distFromEnd = n - 1 - i;  // 距离末尾的距离
-      var w;
-      if (distFromEnd === 0) {
-        w = 0.35;  // 当前消息
-      } else if (distFromEnd === 1) {
-        w = 0.20;  // 前一条
-      } else if (distFromEnd === 2) {
-        w = 0.15;  // 前两条
-      } else if (distFromEnd === 3) {
-        w = 0.10;  // 前三条
-      } else if (distFromEnd === 4) {
-        w = 0.08;  // 前四条
-      } else if (distFromEnd === 5) {
-        w = 0.05;  // 前五条
-      } else {
-        // 更早的消息权重快速衰减
-        w = Math.max(0.01, 0.05 - (distFromEnd - 5) * 0.005);
-      }
-      weights.push(w);
+    // 历史消息合并
+    var histText = histParts.join(" ");
+    contextMessages.push(histText && histText.length >= 2 ? histText : " ");
+    // 最新消息 + AI 合并
+    var latestText = originalQuery;
+    if (aiResponse) {
+      latestText = latestText + " " + aiResponse;
     }
+    contextMessages.push(latestText);
+    
+    console.log('[AutoKB] Semantic: 上下文消息数: 2（历史+最新+AI）');
+    
+    // 权重各 0.55 → 双方在融合时各重复 3 次 = 各 50% 贡献
+    var weights = [0.55, 0.55];
     
     // 使用上下文感知搜索（多消息 embedding 加权融合）
     var processedMessages = [];
@@ -2102,7 +2099,7 @@
       processedMessages.push(preprocessQuery(contextMessages[i]));
     }
     
-    rpcCall('embedding.query_index_with_context', { messages: processedMessages, weights: weights, top_k: _autoKbMaxFiles }, function(r) {
+    rpcCall('embedding.query_index_with_context', { messages: processedMessages, weights: weights, top_k: _autoKbMaxFiles, original_query: preprocessQuery(originalQuery) }, function(r) {
       if (r.error) {
         console.log('[AutoKB] Semantic: 上下文搜索失败', r.error.message || r.error);
         onDone([]);
@@ -2114,47 +2111,27 @@
         onDone([]);
         return;
       }
-      console.log('[AutoKB] Semantic: 上下文搜索结果', results.length, '个');
+      console.log('[AutoKB] Semantic: 上下文搜索结果', results.length, '个（后端已过滤排序）');
       
-      // 过滤低相似度结果（使用相对阈值）
-      var MIN_SIMILARITY = 0.55;  // 最低绝对相似度阈值（提高，避免短查询误触发）
-      var RELATIVE_THRESHOLD = 0.10;  // 与最高分的最小差距（相对阈值）
-      
-      // 找出最高相似度
-      var maxSimilarity = 0;
-      for (var i = 0; i < results.length; i++) {
-        if (results[i].similarity > maxSimilarity) {
-          maxSimilarity = results[i].similarity;
-        }
-      }
-      
-      // 返回匹配的 chunk 片段（包含内容，不再需要读取整个文件）
+      // 后端已处理好关键词+意图过滤，前端直接取用
       var matchedChunks = [];
       for (var i = 0; i < results.length && i < _autoKbMaxFiles; i++) {
-        var sim = results[i].similarity;
-        var diff = maxSimilarity - sim;
-        
-        // 必须同时满足：绝对阈值 + 与最高分差距不超过阈值
-        if (sim >= MIN_SIMILARITY && diff <= RELATIVE_THRESHOLD) {
-          var chunkInfo = results[i].chunkTotal > 1 ? 
-            ' [片段 ' + (results[i].chunkIdx + 1) + '/' + results[i].chunkTotal + ']' : '';
-          console.log('[AutoKB] Semantic: ', results[i].fileName, chunkInfo, '相似度:', sim.toFixed(3), '差距:', diff.toFixed(3));
-          matchedChunks.push({
-            path: results[i].path,
-            fileName: results[i].fileName,
-            content: results[i].chunkText || '',
-            chunkIdx: results[i].chunkIdx || 0,
-            chunkTotal: results[i].chunkTotal || 1,
-            charStart: results[i].charStart || 0,
-            charEnd: results[i].charEnd || 0,
-            similarity: sim
-          });
-        } else {
-          console.log('[AutoKB] Semantic: 跳过', results[i].fileName, '相似度:', sim.toFixed(3), '差距:', diff.toFixed(3));
-        }
+        var chunkInfo = results[i].chunkTotal > 1 ? 
+          ' [片段 ' + (results[i].chunkIdx + 1) + '/' + results[i].chunkTotal + ']' : '';
+        console.log('[AutoKB] Semantic: ', results[i].fileName, chunkInfo, '相似度:', results[i].similarity.toFixed(3));
+        matchedChunks.push({
+          path: results[i].path,
+          fileName: results[i].fileName,
+          content: results[i].chunkText || '',
+          chunkIdx: results[i].chunkIdx || 0,
+          chunkTotal: results[i].chunkTotal || 1,
+          charStart: results[i].charStart || 0,
+          charEnd: results[i].charEnd || 0,
+          similarity: results[i].similarity
+        });
       }
       
-      console.log('[AutoKB] Semantic: 最终匹配', matchedChunks.length, '个片段（最高分:', maxSimilarity.toFixed(3), '，相对阈值:', RELATIVE_THRESHOLD, '）');
+      console.log('[AutoKB] Semantic: 最终匹配', matchedChunks.length, '个片段');
       onDone(matchedChunks);
     });
   }

@@ -1,17 +1,265 @@
 """
 Embedding RPC 模块 - 提供向量搜索功能
-使用本地 model 实现语义搜索
+使用本地 model + Chroma 向量数据库实现语义搜索
 
 依赖（可选）：
 - numpy
 - torch
 - transformers
+- chromadb
+- jieba
+- requests (用于 LLM 意图分类)
 """
 import os
+import re
 import json
 import threading
 import time
 from pathlib import Path
+import requests
+import yaml
+
+# 加载配置
+_CONFIG = None
+
+def _load_config():
+    """加载 Hermes 配置"""
+    global _CONFIG
+    if _CONFIG is None:
+        try:
+            # 从 desktop/_rpc_embedding.py -> desktop -> hermes -> config.yaml
+            config_path = Path(__file__).parent.parent / "config.yaml"
+            with open(config_path, "r", encoding="utf-8") as f:
+                _CONFIG = yaml.safe_load(f)
+        except Exception as e:
+            print(f"[Embedding] 配置加载失败: {e}")
+            _CONFIG = {}
+    return _CONFIG
+
+def _get_llm_config():
+    """获取 LLM API 配置"""
+    config = _load_config()
+    return {
+        "base_url": config.get("model", {}).get("base_url", "http://localhost:3000/v1"),
+        "api_key": config.get("model", {}).get("api_key", ""),
+        "model": config.get("model", {}).get("default", "Qwen")
+    }
+
+# 意图分类缓存（避免重复调用 LLM）
+_intent_cache = {}
+_intent_cache_lock = threading.Lock()
+
+def classify_intent(query, context_messages=None):
+    """使用 LLM 判断查询意图
+    
+    返回意图类别：健康/小说/财务/通用/其他
+    """
+    global _intent_cache
+    
+    # 构建缓存键
+    cache_key = query[:50]  # 取前50字符作为缓存键
+    with _intent_cache_lock:
+        if cache_key in _intent_cache:
+            return _intent_cache[cache_key]
+    
+    try:
+        llm_config = _get_llm_config()
+        if not llm_config["api_key"]:
+            print("[Intent] 未配置 LLM API，跳过意图分类")
+            return "通用"
+        
+        # 构建提示词
+        prompt = f"""请判断以下查询的意图类别，只返回类别名称：
+
+查询：{query}
+
+可选类别：
+- 健康：身体健康、健身、医疗相关
+- 小说：小说创作、剧情、角色相关
+- 财务：信用、账单、消费、财务相关
+- 通用：其他一般性查询
+
+只返回类别名称（健康/小说/财务/通用），不要解释。"""
+        
+        try:
+            response = requests.post(
+                f"{llm_config['base_url']}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {llm_config['api_key']}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": llm_config["model"],
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 10
+                },
+                timeout=30
+            )
+        except Exception as e:
+            print(f"[Intent] LLM 请求失败：{e}")
+            return "通用"
+        
+        if response.status_code == 200:
+            result = response.json()
+            if "choices" not in result or not result["choices"]:
+                print(f"[Intent] 异常响应: {response.text[:200]}")
+                return "通用"
+            content = result["choices"][0].get("message", {}).get("content", "")
+            # 部分 API 使用 delta 格式
+            if not content:
+                content = result["choices"][0].get("delta", {}).get("content", "")
+            intent = content.strip()
+            # 标准化意图
+            intent_map = {
+                "健康": "健康",
+                "小说": "小说",
+                "财务": "财务",
+                "通用": "通用"
+            }
+            intent = intent_map.get(intent, "通用")
+            
+            # 缓存结果
+            with _intent_cache_lock:
+                _intent_cache[cache_key] = intent
+            
+            print(f"[Intent] 查询意图: '{query[:30]}...' → {intent}")
+            return intent
+        else:
+            print(f"[Intent] LLM API 调用失败: {response.status_code}")
+            return "通用"
+            
+    except Exception as e:
+        print(f"[Intent] 意图分类失败: {e}")
+        return "通用"
+
+
+# 意图关键词映射（本地判断，无需 LLM）
+_INTENT_KEYWORDS = {
+    "健康": ["健康", "锻炼", "运动", "健身", "身体", "医疗", "吃药", "医院", "跑步", "训练", "哑铃", "卧推", "推胸", "练胸", "杠铃", "胸部", "肌肉", "力量", "重量"],
+    "小说": list("小说剧情角色故事章节主角配角情节大纲设定"),
+    "财务": ["信用", "账单", "消费", "财务", "银行", "信用卡", "收入", "支出", "存款", "成本", "价格", "贵", "便宜", "省钱", "赚钱", "花钱"]
+}
+
+
+def _determine_intent(keywords):
+    """根据 jieba 关键词判断查询意图（本地判断）
+    
+    使用子串匹配，例如"身体健康"→"健康"也能识别。
+    """
+    scores = {}
+    for intent, words in _INTENT_KEYWORDS.items():
+        score = 0
+        for kw in keywords:
+            kw_l = kw.lower()
+            for w in words:
+                if w in kw_l or kw_l in w:
+                    score += 1
+                    break
+        if score > 0:
+            scores[intent] = score
+    
+    if scores:
+        best = max(scores, key=scores.get)
+        return best
+    return "通用"
+
+
+def _filter_results_with_keywords(query, results, max_candidates=16, jieba_keywords=None):
+    """jieba 关键词匹配 + 意图判断
+    
+    流程：jieba 分词 → 向量搜索 → jieba 关键词匹配 → 意图判断
+    
+    Args:
+        query: 用户查询
+        results: 搜索结果列表
+        max_candidates: 最多评估的候选数
+        jieba_keywords: jieba 提取的关键词（不传则用 regex 提取）
+    """
+    if not results:
+        return results
+    
+    candidates = results[:min(max_candidates, len(results))]
+    
+    # 使用 jieba 关键词（优先）或从查询中提取
+    if jieba_keywords:
+        # 过滤停用词和个人专属词
+        stop_words = {'我的', '我', '本人', '自己', '个人', '这么', '那么', '怎么', 
+            '为什么', '什么', '可以', '没有', '这个', '那个', '这些', '那些',
+            '因为', '所以', '但是', '如果', '虽然', '而且', '然后', '时候',
+            '怎样', '如何', '不是', '就是', '只是', '还是', '或者', '并且',
+            '已经', '应该', '能够', '可能', '需要', '知道', '觉得', '真是',
+            '真的', '一个', '一些', '有点', '有些', '等等', '不过', '不要',
+            '不能', '这样', '那样', '比如', '关于', '除了', '是不是', '有没有',
+            '情况', '记录', '内容', '问题', '结果', '时候', '方面'}
+        keywords = [k for k in jieba_keywords if k not in stop_words and len(k) > 1]
+    else:
+        # 回退：regex 提取
+        import re
+        words = re.findall(r'[\u4e00-\u9fff]{2,5}|[a-zA-Z0-9]+', query)
+        stop_words = {'我的', '我', '本人', '自己', '个人'}
+        keywords = [w for w in words if w not in stop_words and len(w) > 1]
+    
+    # 判断意图（基于关键词）
+    intent = _determine_intent(keywords)
+    if intent != "通用":
+        print(f"[意图] {intent}（关键词: {keywords}）")
+    
+    if not keywords:
+        return results[:5]
+    
+    # 用 jieba 关键词匹配搜索结果
+    scored = []
+    for r in candidates:
+        fname = r.get("fileName", "").lower()
+        chunk = r.get("chunkText", "").lower()[:300]
+        sim = r.get("similarity", 0)
+        
+        keyword_score = 0
+        matched = []
+        for kw in keywords:
+            kw_l = kw.lower()
+            if kw_l in fname:
+                keyword_score += 0.3
+                matched.append(f"{kw}(文件名)")
+            elif kw_l in chunk:
+                keyword_score += 0.15
+                matched.append(kw)
+        
+        if matched:
+            print(f"[匹配] {r.get('fileName', '?')}: {matched}")
+        
+        # 标记是否有关键词匹配，用于动态阈值
+        has_kw_match = keyword_score > 0
+        
+        scored.append((sim + keyword_score, has_kw_match, r))
+    
+    # 按分数降序
+    scored.sort(key=lambda x: x[0], reverse=True)
+    
+    # 过滤：有关键词匹配的用 0.5 阈值，无匹配的用 0.6 阈值（更严格）
+    filtered = []
+    for s, has_kw, r in scored:
+        threshold = 0.5 if has_kw else 0.6
+        if s >= threshold:
+            filtered.append(r)
+    
+    # 如果过滤后为空，尝试返回有关键词匹配的结果
+    any_kw = sum(1 for _, h, _ in scored if h)
+    if not filtered and any_kw:
+        for s, has_kw, r in scored:
+            if has_kw and len(filtered) < 3:
+                filtered.append(r)
+    # 无关键词匹配 → 不强制返回（避免无关文件混入）
+    if not filtered and not any_kw:
+        print(f"[结果] 无任何文件有关键词匹配，跳过返回")
+    elif not filtered and any_kw:
+        filtered = [r for _, _, r in scored[:3]]
+    
+    print(f"[结果] 意图={intent}，保留 {len(filtered)}/{len(candidates)} 个（关键词匹配:{sum(1 for _,h,_ in scored if h)}个）")
+    return filtered
+
+
 
 # 后台构建状态
 _index_build_status = {
@@ -44,12 +292,81 @@ except ImportError:
     _numpy_available = False
     np = None
 
+# 尝试导入 Chroma
+try:
+    import chromadb
+    from chromadb.config import Settings
+    _chroma_available = True
+except ImportError:
+    _chroma_available = False
+    print("[Embedding] ChromaDB 未安装，使用回退模式")
+
+# 尝试导入 jieba（中文分词，用于关键词提取）
+try:
+    import jieba
+    import jieba.analyse
+    _jieba_available = True
+except ImportError:
+    _jieba_available = False
+    print("[Embedding] jieba 未安装，关键词提取功能不可用")
+
 # Local Embedding Config
 _embedding_model_name = "Qwen/Qwen3-Embedding-0.6B"
 _embedding_cache_dir = Path(__file__).parent.resolve() / "cache" / "embeddings"
 _index_file = _embedding_cache_dir / "vault_index.json"
 _embedding_available = False
-_INDEX_VERSION = 2  # 索引格式版本（v2=分块索引），不匹配时强制重建
+_INDEX_VERSION = 3  # 索引格式版本（v3=ChromaDB），不匹配时强制重建
+
+# Chroma 客户端（延迟初始化）
+_chroma_client = None
+_chroma_collection = None
+_current_vault_path = None
+
+
+def _get_chroma_collection(vault_path):
+    """获取或初始化 Chroma 集合
+    
+    每个 vault 对应一个 collection，collection 名称为 vault 路径的哈希
+    """
+    global _chroma_client, _chroma_collection, _current_vault_path
+    
+    if not _chroma_available:
+        return None
+    
+    # 如果 vault 路径变了，需要重新初始化
+    if vault_path != _current_vault_path or _chroma_collection is None:
+        try:
+            import hashlib
+            # 使用 vault 路径的哈希作为 collection 名称
+            vault_hash = hashlib.md5(vault_path.encode()).hexdigest()[:16]
+            collection_name = f"vault_{vault_hash}"
+            
+            # Chroma 数据存储在 cache/embeddings 目录
+            chroma_db_path = _embedding_cache_dir
+            chroma_db_path.mkdir(parents=True, exist_ok=True)
+            
+            # 初始化客户端
+            _chroma_client = chromadb.PersistentClient(
+                path=str(chroma_db_path),
+                settings=Settings(anonymized_telemetry=False)
+            )
+            
+            # 获取或创建 collection
+            _chroma_collection = _chroma_client.get_or_create_collection(
+                name=collection_name,
+                metadata={"vault_path": vault_path, "version": _INDEX_VERSION}
+            )
+            
+            _current_vault_path = vault_path
+            print(f"[Embedding] Chroma collection 初始化完成: {collection_name}")
+            
+        except Exception as e:
+            print(f"[Embedding] Chroma 初始化失败: {e}")
+            _chroma_collection = None
+            return None
+    
+    return _chroma_collection
+
 
 # Local model (lazy load)
 _embedding_model = None
@@ -651,7 +968,7 @@ def _load_index_file():
 
 def reset_on_vault_switch():
     """vault 切换时清除索引缓存和构建状态，强制新 vault 重建索引"""
-    global _index_cache, _index_build_status, _last_index_check_time, _pending_changes_timer
+    global _index_cache, _index_build_status, _last_index_check_time, _pending_changes_timer, _chroma_collection, _current_vault_path
     # 取消待处理的增量更新
     with _pending_changes_lock:
         _pending_file_changes.clear()
@@ -659,6 +976,8 @@ def reset_on_vault_switch():
             _pending_changes_timer.cancel()
             _pending_changes_timer = None
     _index_cache = None
+    _chroma_collection = None  # 清除 Chroma collection 缓存
+    _current_vault_path = None
     _index_build_status = {
         "building": False,
         "progress": 0,
@@ -667,7 +986,7 @@ def reset_on_vault_switch():
         "complete": False
     }
     _last_index_check_time = 0
-    print("[Embedding] vault 已切换，索引缓存已清除")
+    print("[Embedding] vault 已切换，索引缓存和 Chroma collection 已清除")
 
 
 def register(gw):
@@ -786,7 +1105,7 @@ def register(gw):
     # Background build function
     def _start_background_build(vault_path, all_files):
         """后台完整构建索引"""
-        global _index_build_status
+        global _index_build_status, _current_vault_path
         _index_build_status = {
             "building": True,
             "progress": 0,
@@ -794,6 +1113,8 @@ def register(gw):
             "error": None,
             "complete": False
         }
+        # 设置当前 vault 路径，供后续查询使用
+        _current_vault_path = vault_path
         
         def build_thread():
             try:
@@ -871,29 +1192,76 @@ def register(gw):
                     _index_build_status["building"] = False
                     return
                 
-                # Step 3: Merge results
-                index_data = []
-                for i, meta in enumerate(chunk_metadata):
-                    index_data.append({
-                        **meta,
-                        "embedding": embeddings[i]
-                    })
-                
+                # Step 3: Save to Chroma
                 _index_build_status["progress"] = len(all_files)
                 
-                # Save index
-                _save_index_file({
-                    "vault_path": vault_path,
-                    "model": _embedding_model_name,
-                    "provider": "local",
-                    "version": _INDEX_VERSION,
-                    "count": len(index_data),
-                    "fileCount": len(all_files),
-                    "chunkCount": len(index_data),
-                    "index": index_data
-                })
+                # 获取 Chroma collection
+                collection = _get_chroma_collection(vault_path)
                 
-                print(f"[Embedding] 后台构建完成，共 {len(index_data)} 个 chunk（来自 {len(all_files)} 个文件）")
+                if collection is not None and _chroma_available:
+                    # 清空旧数据
+                    try:
+                        collection.delete(where={"vault_path": vault_path})
+                        print(f"[Embedding] 已清空旧索引数据")
+                    except Exception as e:
+                        print(f"[Embedding] 清空旧数据警告: {e}")
+                    
+                    # 批量添加到 Chroma
+                    batch_size = 100
+                    total_chunks = len(chunk_metadata)
+                    
+                    for batch_start in range(0, total_chunks, batch_size):
+                        batch_end = min(batch_start + batch_size, total_chunks)
+                        batch_ids = [f"chunk_{i}" for i in range(batch_start, batch_end)]
+                        batch_embeddings = [embeddings[i] if isinstance(embeddings[i], list) else embeddings[i].tolist() for i in range(batch_start, batch_end)]
+                        batch_documents = [texts_to_encode[i] for i in range(batch_start, batch_end)]
+                        batch_metadatas = [{
+                            "path": chunk_metadata[i]["path"],
+                            "fileName": chunk_metadata[i]["fileName"],
+                            "fileExt": chunk_metadata[i]["fileExt"],
+                            "length": chunk_metadata[i]["length"],
+                            "mtime": chunk_metadata[i]["mtime"],
+                            "chunkIdx": chunk_metadata[i]["chunkIdx"],
+                            "chunkTotal": chunk_metadata[i]["chunkTotal"],
+                            "chunkText": chunk_metadata[i]["chunkText"],
+                            "charStart": chunk_metadata[i]["charStart"],
+                            "charEnd": chunk_metadata[i]["charEnd"],
+                            "vault_path": vault_path
+                        } for i in range(batch_start, batch_end)]
+                        
+                        collection.add(
+                            ids=batch_ids,
+                            embeddings=batch_embeddings,
+                            documents=batch_documents,
+                            metadatas=batch_metadatas
+                        )
+                        
+                        if (batch_end // batch_size) % 10 == 0:
+                            print(f"[Embedding] Chroma 写入进度: {batch_end}/{total_chunks}")
+                    
+                    print(f"[Embedding] Chroma 索引构建完成，共 {total_chunks} 个 chunk")
+                else:
+                    # Chroma 不可用，回退到 JSON 模式
+                    print("[Embedding] Chroma 不可用，使用 JSON 回退模式")
+                    index_data = []
+                    for i, meta in enumerate(chunk_metadata):
+                        index_data.append({
+                            **meta,
+                            "embedding": embeddings[i]
+                        })
+                    
+                    _save_index_file({
+                        "vault_path": vault_path,
+                        "model": _embedding_model_name,
+                        "provider": "local",
+                        "version": _INDEX_VERSION,
+                        "count": len(index_data),
+                        "fileCount": len(all_files),
+                        "chunkCount": len(index_data),
+                        "index": index_data
+                    })
+                
+                print(f"[Embedding] 后台构建完成，共 {len(chunk_metadata)} 个 chunk（来自 {len(all_files)} 个文件）")
                 _index_build_status["building"] = False
                 _index_build_status["complete"] = True
             except Exception as e:
@@ -1026,10 +1394,14 @@ def register(gw):
         thread.start()
 
     def _embedding_build_index(rid, params):
-        """构建 vault 的向量索引（后台运行，不阻塞主线程）"""
+        """构建 vault 的向量索引（后台运行，不阻塞主线程）- Chroma 版本"""
         vault_path = params.get("vault_path", "")
         if not vault_path or not os.path.isdir(vault_path):
             return gw._err(rid, 4004, f"vault path not found: {vault_path}")
+        
+        # 设置当前 vault 路径
+        global _current_vault_path
+        _current_vault_path = vault_path
         
         # If already building, return current status
         if _index_build_status["building"]:
@@ -1040,22 +1412,39 @@ def register(gw):
             })
         
         # Collect all files (exclude archive folders + main directory)
-        # 排除归档文件夹和 main 目录（包含待处理文件）
         _EXCLUDE_DIRS = {'_archive', 'archive', '_archived', 'archived', '_old', 'old', 'trash', '.trash', '_archive_old', 'archive_old', 'main'}
         all_files = []
         for root, dirs, files in os.walk(vault_path):
-            # 排除隐藏目录 + 归档目录 + main 目录
             dirs[:] = [d for d in dirs if not d.startswith('.') and d.lower() not in _EXCLUDE_DIRS]
             for f in files:
                 if not f.startswith('.'):
                     all_files.append(os.path.join(root, f))
         
-        # Check if index already exists
+        # 优先检查 Chroma
+        if _chroma_available:
+            try:
+                collection = _get_chroma_collection(vault_path)
+                if collection is not None:
+                    # 获取 Chroma 中的统计信息
+                    count = collection.count()
+                    if count > 0:
+                        # 检查是否有文件变化
+                        # 简化处理：如果 Chroma 中有数据，直接返回缓存状态
+                        # 文件变化检测由前端触发重建
+                        print(f"[Embedding] Chroma 索引已存在（{count} 个 chunk），直接加载")
+                        return gw._ok(rid, {
+                            "count": count,
+                            "index_type": "chroma",
+                            "loaded_from_cache": True
+                        })
+            except Exception as e:
+                print(f"[Embedding] 检查 Chroma 索引失败：{e}")
+        
+        # 回退到 JSON 检查（兼容性）
         if _index_file.exists():
             try:
                 cached_index = _load_index_file()
                 if cached_index is not None:
-                    # 检查索引版本，不匹配则强制重建
                     cached_version = cached_index.get("version", 1)
                     if cached_version != _INDEX_VERSION:
                         print(f"[Embedding] 索引版本不匹配（缓存 v{cached_version} ≠ 当前 v{_INDEX_VERSION}），强制重建...")
@@ -1066,14 +1455,12 @@ def register(gw):
                             "reason": "index version mismatch, rebuilding"
                         })
                     
-                    # Check if vault path and model match
                     if cached_index.get("vault_path") == vault_path and cached_index.get("model") == _embedding_model_name:
                         cached_files = set(item.get("path") for item in cached_index.get("index", []))
                         current_files = set(all_files)
                         new_files = current_files - cached_files
                         deleted_files = cached_files - current_files
                         
-                        # Check for modified files
                         modified_files = []
                         cached_index_map = {item.get("path"): item for item in cached_index.get("index", [])}
                         for fp in current_files:
@@ -1087,14 +1474,14 @@ def register(gw):
                                     pass
                         
                         if len(new_files) == 0 and len(deleted_files) == 0 and len(modified_files) == 0:
-                            print(f"[Embedding] 索引无变化，直接加载（{cached_index.get('count', 0)} 个文件）")
+                            print(f"[Embedding] JSON 索引无变化，直接加载（{cached_index.get('count', 0)} 个文件）")
                             return gw._ok(rid, {
                                 "count": cached_index.get("count", 0),
                                 "index_file": str(_index_file),
                                 "loaded_from_cache": True
                             })
                         
-                        print(f"[Embedding] 发现文件变化：新增 {len(new_files)} 个，删除 {len(deleted_files)} 个，修改 {len(modified_files)} 个，后台更新...")
+                        print(f"[Embedding] JSON 发现文件变化：新增 {len(new_files)} 个，删除 {len(deleted_files)} 个，修改 {len(modified_files)} 个，后台更新...")
                         all_new_files = list(new_files) + modified_files
                         _start_background_update(vault_path, cached_index, all_new_files, deleted_files)
                         return gw._ok(rid, {
@@ -1103,7 +1490,7 @@ def register(gw):
                             "deleted_files": len(deleted_files)
                         })
             except Exception as e:
-                print(f"[Embedding] 加载缓存索引失败：{e}，将后台重新构建")
+                print(f"[Embedding] 加载 JSON 缓存索引失败：{e}，将后台重新构建")
         
         print(f"[Embedding] 找到 {len(all_files)} 个文件，开始后台构建...")
         _start_background_build(vault_path, all_files)
@@ -1223,10 +1610,116 @@ def register(gw):
             _index_cache = None
             return None
 
+    def _extract_keywords_with_embedding(text, top_n=5):
+        """使用 jieba + Qwen embedding 提取关键词（模仿 KeyBERT）
+        
+        步骤：
+        1. jieba 分词提取候选词（保留专属词如"我的"）
+        2. 用 Qwen embedding 计算每个词与整句的相似度
+        3. 返回相似度最高的关键词
+        """
+        if not _jieba_available or not text:
+            return []
+        
+        try:
+            # 定义专属词（个人相关）
+            personal_words = {'我的', '我', '本人', '自己', '个人'}
+            
+            # 定义停用词
+            stop_words = {'还是', '会', '有', '匹配', '问题', 'bug', '错误', '不对', '不是', '没', '没有',
+                '怎么', '怎么样', '怎样', '如何', '为什么', '什么', '这么', '那么',
+                '可以', '能够', '应该', '可能', '需要', '知道', '觉得', '真是', '真的',
+                '这个', '那个', '这些', '那些', '因为', '所以', '但是', '如果', '虽然',
+                '而且', '然后', '时候', '一个', '一些', '有点', '有些', '等等', '不过',
+                '不要', '不能', '这样', '那样', '比如', '关于', '除了', '是不是', '有没有',
+                '我练', '你练', '他是', '她是', '我是', '我是说'}
+            
+            # 1. jieba 分词提取候选词
+            words = list(set(jieba.lcut(text)))
+            words = [w.strip() for w in words if len(w.strip()) > 1]  # 过滤单字和空格
+            
+            # 过滤重复词（如"练胸练胸""胸练胸练"这种）
+            filtered_words = []
+            for w in words:
+                # 跳过纯重复的词（如"练练""胸胸"）
+                if len(set(w)) == 1:
+                    continue
+                # 跳过明显是重复拼接的词（长度>4且重复模式）
+                if len(w) > 4:
+                    # 检查是否是重复模式（如"练胸练胸"）
+                    half = len(w) // 2
+                    if w[:half] == w[half:2*half]:
+                        continue
+                filtered_words.append(w)
+            words = filtered_words
+            
+            # 强制保留专属词
+            found_personal = [w for w in personal_words if w in text]
+            
+            # 添加 TF-IDF 提取的关键词作为补充
+            tfidf_words = jieba.analyse.extract_tags(text, topK=15, withWeight=False)
+            # 同样过滤 TF-IDF 结果的重复词
+            tfidf_filtered = []
+            for w in tfidf_words:
+                if len(set(w)) == 1:
+                    continue
+                if len(w) > 4:
+                    half = len(w) // 2
+                    if w[:half] == w[half:2*half]:
+                        continue
+                tfidf_filtered.append(w)
+            words = list(set(words + tfidf_filtered))
+            
+            if len(words) == 0:
+                return found_personal[:top_n]
+            
+            # 2. 使用已加载的 Qwen 模型计算 embedding
+            global _embedding_model, _tokenizer
+            if _embedding_model is None or _tokenizer is None:
+                print("[Keywords] 模型未加载，使用 TF-IDF 回退")
+                # 回退到 TF-IDF，但优先保留专属词
+                result = found_personal + [w for w in tfidf_words if w not in found_personal]
+                return result[:top_n]
+            
+            # 简化方案：直接使用 TF-IDF + 专属词优先（避免 DirectML GPU 错误）
+            # 按 TF-IDF 权重排序
+            from jieba.analyse import extract_tags
+            tfidf_with_weight = extract_tags(text, topK=30, withWeight=True)
+            
+            # 过滤停用词
+            tfidf_with_weight = [(w, weight) for w, weight in tfidf_with_weight if w not in stop_words]
+            
+            # 构建词到权重的映射
+            word_weights = {w: float(weight) for w, weight in tfidf_with_weight}
+            
+            # 给专属词额外加权
+            for pw in found_personal:
+                if pw in word_weights:
+                    word_weights[pw] *= 2.0  # 专属词权重翻倍
+                else:
+                    word_weights[pw] = 0.5  # 未在 TF-IDF 中的专属词给予基础权重
+            
+            # 按权重排序
+            sorted_words = sorted(word_weights.items(), key=lambda x: x[1], reverse=True)
+            result_words = [w for w, _ in sorted_words[:top_n]]
+            
+            # 确保专属词在前面
+            for pw in reversed(found_personal):
+                if pw in result_words:
+                    result_words.remove(pw)
+                result_words.insert(0, pw)
+            
+            return result_words[:top_n]
+                
+        except Exception as e:
+            print(f"[Keywords] 提取失败: {e}")
+            return []
+
     def _embedding_query_index(rid, params):
-        """使用索引进行向量搜索（返回匹配的 chunk 片段）"""
+        """使用索引进行向量搜索（返回匹配的 chunk 片段）- Chroma 版本"""
         query = params.get("query", "")
         top_k = params.get("top_k", 5)
+        vault_path = params.get("vault_path", _current_vault_path)
         
         if not query:
             return gw._err(rid, 4000, "query required")
@@ -1234,71 +1727,111 @@ def register(gw):
         if _model_loading:
             return gw._err(rid, 5002, "model loading, please wait")
         
-        if not _index_file.exists():
-            return gw._err(rid, 4004, "index not built, please call embedding.build_index first")
-        
-        # 搜索前检查索引是否过期（轻量检查，每 5 分钟最多一次）
-        _maybe_refresh_index()
-        
         query_embedding = _compute_embedding(query)
         if query_embedding is None:
             return gw._err(rid, 5001, "embedding model not available")
         
         try:
-            # 从内存缓存获取索引（自动检测文件更新）
-            cache = _get_index_in_memory()
-            if cache is None:
-                return gw._ok(rid, {"results": [], "total": 0})
+            # 优先使用 Chroma
+            collection = _get_chroma_collection(vault_path) if vault_path else None
             
-            documents = cache["documents"]
-            matrix = cache["matrix"]
+            if collection is not None and _chroma_available:
+                # Chroma 查询
+                results = collection.query(
+                    query_embeddings=[query_embedding if isinstance(query_embedding, list) else query_embedding.tolist()],
+                    n_results=top_k * 3,  # 多取一些用于去重
+                    include=["metadatas", "distances"]
+                )
+                
+                all_results = []
+                if results and results["metadatas"] and results["metadatas"][0]:
+                    for i, meta in enumerate(results["metadatas"][0]):
+                        # Chroma 返回的是距离（L2），转换为相似度（余弦）
+                        distance = results["distances"][0][i]
+                        # L2 距离转余弦相似度（近似）
+                        similarity = 1.0 / (1.0 + distance)
+                        
+                        all_results.append({
+                            "path": meta.get("path", ""),
+                            "fileName": meta.get("fileName", ""),
+                            "similarity": similarity,
+                            "chunkIdx": meta.get("chunkIdx", 0),
+                            "chunkTotal": meta.get("chunkTotal", 1),
+                            "chunkText": meta.get("chunkText", ""),
+                            "charStart": meta.get("charStart", 0),
+                            "charEnd": meta.get("charEnd", 0)
+                        })
+                
+                # 去重：同一文件只保留相似度最高的 chunk
+                seen_files = {}
+                top_results = []
+                max_chunks_per_file = 2
+                for r in all_results:
+                    fp = r["path"]
+                    cnt = seen_files.get(fp, 0)
+                    if cnt >= max_chunks_per_file:
+                        continue
+                    seen_files[fp] = cnt + 1
+                    top_results.append(r)
+                    if len(top_results) >= top_k:
+                        break
+                
+                return gw._ok(rid, {"results": top_results, "total": len(all_results)})
             
-            # 批量计算相似度（numpy 矩阵运算，比循环快 10-100 倍）
-            if matrix is not None and _numpy_available and np is not None:
-                q = np.array(query_embedding, dtype=np.float32)
-                q_norm = np.linalg.norm(q)
-                if q_norm > 0:
-                    q = q / q_norm
-                # 点积 = 余弦相似度（因为都已归一化）
-                similarities = matrix @ q  # (N,) 向量
             else:
-                # 无 numpy 时回退到逐个计算
-                similarities = [_cosine_similarity(query_embedding, doc.get("embedding", [])) for doc in documents]
-            
-            # 构建结果并排序
-            all_results = []
-            for i, doc in enumerate(documents):
-                sim = float(similarities[i]) if hasattr(similarities[i], '__float__') else float(similarities[i])
-                all_results.append({
-                    "path": doc.get("path", ""),
-                    "fileName": doc.get("fileName", ""),
-                    "similarity": sim,
-                    "chunkIdx": doc.get("chunkIdx", 0),
-                    "chunkTotal": doc.get("chunkTotal", 1),
-                    "chunkText": doc.get("chunkText", ""),
-                    "charStart": doc.get("charStart", 0),
-                    "charEnd": doc.get("charEnd", 0)
-                })
-            
-            # 按相似度排序
-            all_results.sort(key=lambda x: x["similarity"], reverse=True)
-            
-            # 去重：同一文件只保留相似度最高的 chunk
-            # 但允许同一文件最多 2 个 chunk（如果都很相关）
-            seen_files = {}
-            top_results = []
-            max_chunks_per_file = 2
-            for r in all_results:
-                fp = r["path"]
-                cnt = seen_files.get(fp, 0)
-                if cnt >= max_chunks_per_file:
-                    continue
-                seen_files[fp] = cnt + 1
-                top_results.append(r)
-                if len(top_results) >= top_k:
-                    break
-            
-            return gw._ok(rid, {"results": top_results, "total": len(all_results)})
+                # Chroma 不可用，回退到 JSON 模式
+                if not _index_file.exists():
+                    return gw._err(rid, 4004, "index not built, please call embedding.build_index first")
+                
+                _maybe_refresh_index()
+                cache = _get_index_in_memory()
+                if cache is None:
+                    return gw._ok(rid, {"results": [], "total": 0})
+                
+                documents = cache["documents"]
+                matrix = cache["matrix"]
+                
+                # 批量计算相似度
+                if matrix is not None and _numpy_available and np is not None:
+                    q = np.array(query_embedding, dtype=np.float32)
+                    q_norm = np.linalg.norm(q)
+                    if q_norm > 0:
+                        q = q / q_norm
+                    similarities = matrix @ q
+                else:
+                    similarities = [_cosine_similarity(query_embedding, doc.get("embedding", [])) for doc in documents]
+                
+                all_results = []
+                for i, doc in enumerate(documents):
+                    sim = float(similarities[i]) if hasattr(similarities[i], '__float__') else float(similarities[i])
+                    all_results.append({
+                        "path": doc.get("path", ""),
+                        "fileName": doc.get("fileName", ""),
+                        "similarity": sim,
+                        "chunkIdx": doc.get("chunkIdx", 0),
+                        "chunkTotal": doc.get("chunkTotal", 1),
+                        "chunkText": doc.get("chunkText", ""),
+                        "charStart": doc.get("charStart", 0),
+                        "charEnd": doc.get("charEnd", 0)
+                    })
+                
+                all_results.sort(key=lambda x: x["similarity"], reverse=True)
+                
+                seen_files = {}
+                top_results = []
+                max_chunks_per_file = 2
+                for r in all_results:
+                    fp = r["path"]
+                    cnt = seen_files.get(fp, 0)
+                    if cnt >= max_chunks_per_file:
+                        continue
+                    seen_files[fp] = cnt + 1
+                    top_results.append(r)
+                    if len(top_results) >= top_k:
+                        break
+                
+                return gw._ok(rid, {"results": top_results, "total": len(all_results)})
+                
         except Exception as e:
             return gw._err(rid, 5000, str(e))
 
@@ -1307,28 +1840,24 @@ def register(gw):
         return gw._ok(rid, _index_build_status)
 
     def _embedding_query_index_with_context(rid, params):
-        """上下文感知向量搜索：接收多条消息，分别计算 embedding 后加权融合，再搜索索引
+        """上下文感知向量搜索：接收多条消息，分别计算 embedding 后加权融合，再搜索索引 - Chroma 版本
         
         params:
           - messages: [str] 消息列表，最后一条是当前消息（权重最高）
           - weights: [float] 可选，每条消息的权重，默认自动递减
           - top_k: int 可选，返回结果数量
+          - vault_path: str 可选，vault 路径
         """
         messages = params.get("messages", [])
         weights = params.get("weights", None)
         top_k = params.get("top_k", 5)
+        vault_path = params.get("vault_path", _current_vault_path)
 
         if not messages:
             return gw._err(rid, 4000, "messages required")
 
         if _model_loading:
             return gw._err(rid, 5002, "model loading, please wait")
-
-        if not _index_file.exists():
-            return gw._err(rid, 4004, "index not built, please call embedding.build_index first")
-
-        # 搜索前检查索引是否过期
-        _maybe_refresh_index()
 
         # 批量计算所有消息的 embedding
         embeddings = _compute_embedding_batch(messages)
@@ -1339,19 +1868,34 @@ def register(gw):
         n = len(messages)
         if weights and len(weights) == n:
             w = [float(x) for x in weights]
+            print(f"[Embedding] 使用前端传入的权重，共 {len(weights)} 个")
+        elif weights and len(weights) > 0:
+            # 权重数组长度不匹配，补齐或截断
+            print(f"[Embedding] 警告：权重数组长度不匹配（传入 {len(weights)}，需要 {n}），自动调整")
+            w = [float(x) for x in weights[:n]]  # 截断
+            while len(w) < n:  # 补齐
+                w.append(0.01)
         else:
-            # 默认权重：当前消息 0.5，倒数第2条 0.3，倒数第3条 0.2，更早的 0.1
+            # 默认权重：当前消息占60%以上，历史消息快速衰减
+            print(f"[Embedding] 使用默认权重策略（共 {n} 条消息，当前消息权重60%+）")
             w = []
             for i in range(n):
                 dist_from_end = n - 1 - i  # 距离末尾的距离
                 if dist_from_end == 0:
-                    w.append(0.5)
+                    w.append(0.65)  # 当前消息：65%
                 elif dist_from_end == 1:
-                    w.append(0.3)
+                    w.append(0.15)  # 前一条：15%
                 elif dist_from_end == 2:
-                    w.append(0.2)
+                    w.append(0.08)  # 前两条：8%
+                elif dist_from_end == 3:
+                    w.append(0.05)  # 前三条：5%
+                elif dist_from_end == 4:
+                    w.append(0.03)  # 前四条：3%
+                elif dist_from_end == 5:
+                    w.append(0.02)  # 前五条：2%
                 else:
-                    w.append(0.1)
+                    # 更早的消息权重极小
+                    w.append(max(0.005, 0.02 - (dist_from_end - 5) * 0.002))
 
         # 调试日志：显示拼接的消息和权重
         print(f"[Embedding] 上下文感知搜索：共 {n} 条消息")
@@ -1372,117 +1916,292 @@ def register(gw):
         if norm > 0:
             fused = [x / norm for x in fused]
 
-        try:
-            cache = _get_index_in_memory()
-            if cache is None:
-                return gw._ok(rid, {"results": [], "total": 0})
-
-            documents = cache["documents"]
-            matrix = cache["matrix"]
-
-            # 用融合向量搜索
-            if matrix is not None and _numpy_available and np is not None:
-                q = np.array(fused, dtype=np.float32)
-                # fused 已经归一化，matrix 也已归一化，直接点积
-                similarities = matrix @ q
+        # 构建加权融合文本（用于关键词提取）
+        # 只取权重最高的前3条消息提取关键词（避免抱怨/反馈内容干扰）
+        # 按权重排序，取前3
+        msg_with_weight = [(messages[i], w[i]) for i in range(len(messages))]
+        msg_with_weight.sort(key=lambda x: x[1], reverse=True)
+        
+        # 定义疑问词（真实查询的标志）
+        question_words = {'怎么', '什么', '如何', '怎样', '哪里', '为什么', '吗', '呢'}
+        # 定义负面词（抱怨的标志）
+        negative_words = {'还是', '会', '问题', 'bug', '错误', '不对', '没', '没有'}
+        
+        # 判断消息意图，过滤抱怨内容
+        top_messages = []
+        for msg, weight in msg_with_weight[:3]:
+            if weight <= 0.1:
+                continue
+            
+            # 检查是否是抱怨：包含负面词且不包含疑问词
+            has_negative = any(nw in msg for nw in negative_words)
+            has_question = any(qw in msg for qw in question_words)
+            
+            if has_negative and not has_question:
+                # 抱怨内容，降低权重但不完全排除
+                print(f"[Keywords] 检测到抱怨内容，降低权重: {msg[:30]}...")
+                # 如果权重较高，仍然使用但标记
+                if weight > 0.3:
+                    top_messages.append(msg)
             else:
-                similarities = [_cosine_similarity(fused, doc.get("embedding", [])) for doc in documents]
+                # 正常查询
+                top_messages.append(msg)
+        
+        # 按权重重复消息
+        fused_text_parts = []
+        for msg in top_messages:
+            # 找到对应权重
+            for i, m in enumerate(messages):
+                if m == msg and w[i] > 0.5:
+                    repeat_count = 3
+                elif m == msg and w[i] > 0.3:
+                    repeat_count = 2
+                elif m == msg:
+                    repeat_count = 1
+            for _ in range(repeat_count):
+                fused_text_parts.append(msg)
+        
+        fused_text = " ".join(fused_text_parts)
+        
+        # 关键词提取策略：
+        # 1. 优先从原始查询提取（不混入 AI 回复）
+        original_query = params.get("original_query", "")
+        primary_kw = _extract_keywords_with_embedding(original_query, top_n=5)
+        
+        # 2. 检查意图：原始查询是否能确定意图
+        intent_primary = _determine_intent(primary_kw, original_query) if primary_kw else "通用"
+        
+        # 3. 如果意图是"通用"，说明原始查询缺乏话题关键词
+        #    → 从"原始查询 + AI回复(前80字)"补充提取
+        if intent_primary == "通用" and len(messages) >= 2:
+            latest_text = messages[-1] if messages else ""
+            if len(latest_text) > 80:
+                latest_text = latest_text[:80]
+            expanded_kw = _extract_keywords_with_embedding(latest_text, top_n=5)
+            keywords = list(dict.fromkeys(primary_kw + expanded_kw))[:5]
+            print(f"[Keywords] 原始查询意图=通用，补充 AI 上下文: {keywords}")
+        else:
+            keywords = primary_kw
+            print(f"[Keywords] 从原始查询提取: {keywords}")
 
-            # 构建结果并排序
-            all_results = []
-            for i, doc in enumerate(documents):
-                sim = float(similarities[i]) if hasattr(similarities[i], '__float__') else float(similarities[i])
-                all_results.append({
-                    "path": doc.get("path", ""),
-                    "fileName": doc.get("fileName", ""),
-                    "similarity": sim,
-                    "chunkIdx": doc.get("chunkIdx", 0),
-                    "chunkTotal": doc.get("chunkTotal", 1),
-                    "chunkText": doc.get("chunkText", ""),
-                    "charStart": doc.get("charStart", 0),
-                    "charEnd": doc.get("charEnd", 0)
-                })
+        try:
+            # 优先使用 Chroma
+            collection = _get_chroma_collection(vault_path) if vault_path else None
+            
+            if collection is not None and _chroma_available:
+                # Chroma 查询
+                results = collection.query(
+                    query_embeddings=[fused],
+                    n_results=top_k * 5,  # 多查一些，方便后续过滤
+                    include=["metadatas", "distances"]
+                )
+                
+                all_results = []
+                if results and results["metadatas"] and results["metadatas"][0]:
+                    for i, meta in enumerate(results["metadatas"][0]):
+                        distance = results["distances"][0][i]
+                        similarity = 1.0 / (1.0 + distance)
+                        
+                        all_results.append({
+                            "path": meta.get("path", ""),
+                            "fileName": meta.get("fileName", ""),
+                            "similarity": similarity,
+                            "chunkIdx": meta.get("chunkIdx", 0),
+                            "chunkTotal": meta.get("chunkTotal", 1),
+                            "chunkText": meta.get("chunkText", ""),
+                            "charStart": meta.get("charStart", 0),
+                            "charEnd": meta.get("charEnd", 0)
+                        })
+                
+                # 按相似度排序
+                all_results.sort(key=lambda x: x["similarity"], reverse=True)
+                
+                # 关键词加权排序（本地快速过滤）
+                query_text = messages[-1]  # 最后一条消息是当前查询
+                all_results = _filter_results_with_keywords(query_text, all_results, max_candidates=top_k * 2, jieba_keywords=keywords)                
+                # 去重
+                seen_files = {}
+                top_results = []
+                max_chunks_per_file = 2
+                for r in all_results:
+                    fp = r["path"]
+                    cnt = seen_files.get(fp, 0)
+                    if cnt >= max_chunks_per_file:
+                        continue
+                    seen_files[fp] = cnt + 1
+                    top_results.append(r)
+                    if len(top_results) >= top_k:
+                        break
+                
+                return gw._ok(rid, {"results": top_results, "total": len(all_results)})
+            
+            else:
+                # Chroma 不可用，回退到 JSON 模式
+                if not _index_file.exists():
+                    return gw._err(rid, 4004, "index not built, please call embedding.build_index first")
+                
+                _maybe_refresh_index()
+                cache = _get_index_in_memory()
+                if cache is None:
+                    return gw._ok(rid, {"results": [], "total": 0})
 
-            all_results.sort(key=lambda x: x["similarity"], reverse=True)
+                documents = cache["documents"]
+                matrix = cache["matrix"]
 
-            # 去重：同一文件最多 2 个 chunk
-            seen_files = {}
-            top_results = []
-            max_chunks_per_file = 2
-            for r in all_results:
-                fp = r["path"]
-                cnt = seen_files.get(fp, 0)
-                if cnt >= max_chunks_per_file:
-                    continue
-                seen_files[fp] = cnt + 1
-                top_results.append(r)
-                if len(top_results) >= top_k:
-                    break
+                # 用融合向量搜索
+                if matrix is not None and _numpy_available and np is not None:
+                    q = np.array(fused, dtype=np.float32)
+                    similarities = matrix @ q
+                else:
+                    similarities = [_cosine_similarity(fused, doc.get("embedding", [])) for doc in documents]
 
-            return gw._ok(rid, {"results": top_results, "total": len(all_results)})
+                all_results = []
+                for i, doc in enumerate(documents):
+                    sim = float(similarities[i]) if hasattr(similarities[i], '__float__') else float(similarities[i])
+                    all_results.append({
+                        "path": doc.get("path", ""),
+                        "fileName": doc.get("fileName", ""),
+                        "similarity": sim,
+                        "chunkIdx": doc.get("chunkIdx", 0),
+                        "chunkTotal": doc.get("chunkTotal", 1),
+                        "chunkText": doc.get("chunkText", ""),
+                        "charStart": doc.get("charStart", 0),
+                        "charEnd": doc.get("charEnd", 0)
+                    })
+
+                all_results.sort(key=lambda x: x["similarity"], reverse=True)
+                
+                # 关键词加权排序（本地快速过滤）
+                query_text = messages[-1]
+                all_results = _filter_results_with_keywords(query_text, all_results, max_candidates=top_k * 2, jieba_keywords=keywords)
+                
+                seen_files = {}
+                top_results = []
+                max_chunks_per_file = 2
+                for r in all_results:
+                    fp = r["path"]
+                    cnt = seen_files.get(fp, 0)
+                    if cnt >= max_chunks_per_file:
+                        continue
+                    seen_files[fp] = cnt + 1
+                    top_results.append(r)
+                    if len(top_results) >= top_k:
+                        break
+
+                return gw._ok(rid, {"results": top_results, "total": len(all_results)})
         except Exception as e:
             return gw._err(rid, 5000, str(e))
 
     def _embedding_get_chunk_neighbors(rid, params):
-        """获取指定 chunk 的相邻片段（用于提供上下文）
+        """获取指定 chunk 的相邻片段（用于提供上下文）- Chroma 版本
         
         params:
           - path: str 文件路径
           - chunk_idx: int chunk 索引
           - neighbor_count: int 可选，前后各取多少个邻居，默认 1（即总共最多 3 个片段）
+          - vault_path: str 可选，vault 路径
         """
         path = params.get("path", "")
         chunk_idx = params.get("chunk_idx", 0)
         neighbor_count = params.get("neighbor_count", 1)
+        vault_path = params.get("vault_path", _current_vault_path)
         
         if not path:
             return gw._err(rid, 4000, "path required")
         
         try:
-            cache = _get_index_in_memory()
-            if cache is None:
-                return gw._ok(rid, {"chunks": []})
+            # 优先使用 Chroma
+            collection = _get_chroma_collection(vault_path) if vault_path else None
             
-            documents = cache["documents"]
+            if collection is not None and _chroma_available:
+                # 从 Chroma 获取该文件的所有 chunks
+                results = collection.get(
+                    where={"path": path},
+                    include=["metadatas"]
+                )
+                
+                file_chunks = []
+                if results and results["metadatas"]:
+                    for meta in results["metadatas"]:
+                        file_chunks.append({
+                            "path": meta.get("path", ""),
+                            "fileName": meta.get("fileName", ""),
+                            "chunkIdx": meta.get("chunkIdx", 0),
+                            "chunkTotal": meta.get("chunkTotal", 1),
+                            "chunkText": meta.get("chunkText", ""),
+                            "charStart": meta.get("charStart", 0),
+                            "charEnd": meta.get("charEnd", 0)
+                        })
+                
+                file_chunks.sort(key=lambda x: x.get("chunkIdx", 0))
+                
+                if not file_chunks:
+                    return gw._ok(rid, {"chunks": []})
+                
+                # 找到目标 chunk
+                target_idx = -1
+                for i, c in enumerate(file_chunks):
+                    if c.get("chunkIdx") == chunk_idx:
+                        target_idx = i
+                        break
+                
+                if target_idx == -1:
+                    return gw._ok(rid, {"chunks": []})
+                
+                # 计算范围
+                start_idx = max(0, target_idx - neighbor_count)
+                end_idx = min(len(file_chunks), target_idx + neighbor_count + 1)
+                
+                result_chunks = []
+                for i in range(start_idx, end_idx):
+                    c = file_chunks[i]
+                    result_chunks.append({
+                        **c,
+                        "isTarget": (i == target_idx)
+                    })
+                
+                return gw._ok(rid, {"chunks": result_chunks, "count": len(result_chunks)})
             
-            # 找到该文件的所有 chunks，按 chunkIdx 排序
-            file_chunks = [d for d in documents if d.get("path") == path]
-            file_chunks.sort(key=lambda x: x.get("chunkIdx", 0))
-            
-            if not file_chunks:
-                return gw._ok(rid, {"chunks": []})
-            
-            # 找到目标 chunk 在列表中的位置
-            target_idx = -1
-            for i, c in enumerate(file_chunks):
-                if c.get("chunkIdx") == chunk_idx:
-                    target_idx = i
-                    break
-            
-            if target_idx == -1:
-                # 找不到指定 chunk，返回空
-                return gw._ok(rid, {"chunks": []})
-            
-            # 计算要取的 chunk 范围
-            start_idx = max(0, target_idx - neighbor_count)
-            end_idx = min(len(file_chunks), target_idx + neighbor_count + 1)
-            
-            # 提取结果
-            result_chunks = []
-            for i in range(start_idx, end_idx):
-                c = file_chunks[i]
-                result_chunks.append({
-                    "path": c.get("path", ""),
-                    "fileName": c.get("fileName", ""),
-                    "chunkIdx": c.get("chunkIdx", 0),
-                    "chunkTotal": c.get("chunkTotal", 1),
-                    "chunkText": c.get("chunkText", ""),
-                    "charStart": c.get("charStart", 0),
-                    "charEnd": c.get("charEnd", 0),
-                    "isTarget": (i == target_idx)  # 标记是否是目标 chunk
-                })
-            
-            return gw._ok(rid, {"chunks": result_chunks, "count": len(result_chunks)})
+            else:
+                # Chroma 不可用，回退到 JSON 模式
+                cache = _get_index_in_memory()
+                if cache is None:
+                    return gw._ok(rid, {"chunks": []})
+                
+                documents = cache["documents"]
+                file_chunks = [d for d in documents if d.get("path") == path]
+                file_chunks.sort(key=lambda x: x.get("chunkIdx", 0))
+                
+                if not file_chunks:
+                    return gw._ok(rid, {"chunks": []})
+                
+                target_idx = -1
+                for i, c in enumerate(file_chunks):
+                    if c.get("chunkIdx") == chunk_idx:
+                        target_idx = i
+                        break
+                
+                if target_idx == -1:
+                    return gw._ok(rid, {"chunks": []})
+                
+                start_idx = max(0, target_idx - neighbor_count)
+                end_idx = min(len(file_chunks), target_idx + neighbor_count + 1)
+                
+                result_chunks = []
+                for i in range(start_idx, end_idx):
+                    c = file_chunks[i]
+                    result_chunks.append({
+                        "path": c.get("path", ""),
+                        "fileName": c.get("fileName", ""),
+                        "chunkIdx": c.get("chunkIdx", 0),
+                        "chunkTotal": c.get("chunkTotal", 1),
+                        "chunkText": c.get("chunkText", ""),
+                        "charStart": c.get("charStart", 0),
+                        "charEnd": c.get("charEnd", 0),
+                        "isTarget": (i == target_idx)
+                    })
+                
+                return gw._ok(rid, {"chunks": result_chunks, "count": len(result_chunks)})
         except Exception as e:
             return gw._err(rid, 5000, str(e))
 
