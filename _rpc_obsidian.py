@@ -252,6 +252,32 @@ def register(gw):
         ver = _vault_watcher.version
         return gw._ok(rid, {"version": ver})
 
+    def _obsidian_get_excluded_folders(rid, params):
+        try:
+            _ensure_config()
+            config = json.loads(_OBSIDIAN_CONFIG.read_text(encoding="utf-8"))
+            folders = config.get("excluded_folders", [])
+            if not isinstance(folders, list):
+                folders = []
+            return gw._ok(rid, {"excluded_folders": folders})
+        except Exception as e:
+            return gw._err(rid, 5000, str(e))
+
+    def _obsidian_set_excluded_folders(rid, params):
+        folders = params.get("excluded_folders", [])
+        if not isinstance(folders, list):
+            folders = []
+        folders = [str(f) for f in folders if f]
+        try:
+            _ensure_config()
+            config = json.loads(_OBSIDIAN_CONFIG.read_text(encoding="utf-8"))
+            config["excluded_folders"] = folders
+            with open(_OBSIDIAN_CONFIG, "w", encoding="utf-8") as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+            return gw._ok(rid, {"excluded_folders": folders})
+        except Exception as e:
+            return gw._err(rid, 5000, str(e))
+
     gw._methods["obsidian.get_active"] = _obsidian_get_active
     gw._methods["obsidian.set_vault"] = _obsidian_set_vault
     gw._methods["obsidian.list_files"] = _obsidian_list_files
@@ -261,6 +287,8 @@ def register(gw):
     gw._methods["obsidian.delete_note"] = _obsidian_delete_note
     gw._methods["obsidian.select_vault"] = _obsidian_select_vault
     gw._methods["obsidian.get_vault_version"] = _obsidian_get_vault_version
+    gw._methods["obsidian.get_excluded_folders"] = _obsidian_get_excluded_folders
+    gw._methods["obsidian.set_excluded_folders"] = _obsidian_set_excluded_folders
 
     # ── Todo 扫描 ──
     import re as _re

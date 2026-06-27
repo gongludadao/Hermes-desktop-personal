@@ -60,6 +60,8 @@
   window._autoKbEnabled = false;  // 暴露为全局变量，供 _obsidian_vault.js 访问
   var _autoKbMaxFiles = 5;  // 最多注入5个匹配文件
   var _autoKbMaxChars = 3000;
+  var _kbExcludedFolders = [];  // 勾选要排除的文件夹（空=不排除，搜索全部）
+  var _kbFoldersLoaded = false;  // 文件夹列表是否已加载
 
   // ── Markdown renderer ───────────────────────────────────────────────
   function renderMarkdown(text) {
@@ -262,8 +264,8 @@
     '.hdc-stream::after{content:"\u258c";animation:hdcBlink 1s step-end infinite}@keyframes hdcBlink{50%{opacity:0}}',
     '.hdc-active .hermes-chat-xterm-host,.hdc-active [data-chat-active] .border-warning\\/50{display:none!important}',
     '.hdc-active [data-chat-active] [id="chat-side-panel"]{display:none!important}',
-    '.hdc-reasoning{max-height:0;overflow:hidden;transition:max-height .3s ease}',
-    '.hdc-reasoning.open{max-height:600px;overflow-y:auto}',
+    '.hdc-reasoning{max-height:20px;overflow:hidden;transition:max-height .3s ease;-webkit-mask:linear-gradient(to bottom,#000 60%,transparent 100%);mask:linear-gradient(to bottom,#000 60%,transparent 100%)}',
+    '.hdc-reasoning.open{max-height:600px;overflow-y:auto;-webkit-mask:none;mask:none}',
     '#hdc-overlay,#hdc-overlay *{-webkit-user-select:text;user-select:text!important}',
     '#hdc-workspace-sidebar,#hdc-workspace-sidebar *{-webkit-user-select:none;user-select:none!important}',
     '#hdc-overlay{background:var(--hdc-bg);color:var(--hdc-fg);font-family:var(--hdc-font)}',
@@ -369,6 +371,8 @@
             '<span id="hdc-auto-kb-bar" style="display:none;align-items:center;gap:4px">' +
               '<input type="checkbox" id="hdc-auto-kb-check" style="cursor:pointer;margin:0;width:12px;height:12px" />' +
               '<label for="hdc-auto-kb-check" style="cursor:pointer;user-select:none">\u81ea\u52a8\u5f15\u7528\u77e5\u8bc6\u5e93</label>' +
+              '<button id="hdc-kb-folder-btn" style="background:none;border:1px solid var(--hdc-border);border-radius:4px;color:var(--hdc-fg-dim);cursor:pointer;font-size:10px;padding:1px 6px;white-space:nowrap">\ud83d\udcc2 \u5168\u90e8</button>' +
+              '<div id="hdc-kb-folder-panel" style="display:none;position:absolute;bottom:100%;left:50%;transform:translateX(-50%);background:var(--hdc-card);border:1px solid var(--hdc-border);border-radius:8px;padding:8px;max-height:320px;overflow-y:auto;z-index:9999;min-width:220px;max-width:340px;box-shadow:0 -4px 12px rgba(0,0,0,.3)"></div>' +
             '</span>' +
           '</div>' +
           '<div id="hdc-attachments" style="display:none;flex-wrap:wrap;gap:4px"></div>' +
@@ -542,7 +546,8 @@
       'new-session', 'refresh-sessions', 'toggle-workspace', 'auto-approve',
       'input-dialog', 'input-dialog-title', 'input-dialog-input',
       'input-dialog-cancel', 'input-dialog-ok', 'editor-save', 'editor-close',
-      'attachments', 'input-status', 'auto-kb-bar', 'auto-kb-check'
+      'attachments', 'input-status', 'auto-kb-bar', 'auto-kb-check',
+      'kb-folder-btn', 'kb-folder-panel'
     ];
 
     elements.forEach(function(id) {
@@ -762,6 +767,46 @@
       };
     }
     if (autoKbBar) autoKbBar.style.display = 'flex';
+
+    // 文件夹选择按钮（右键打开面板）
+    var folderBtn = ui['kb-folder-btn'];
+    var folderPanel = ui['kb-folder-panel'];
+    if (folderBtn && folderPanel) {
+      // 让面板锚定到按钮所在容器（否则 bottom:100% 会定位到远处的已定位祖先）
+      if (folderBtn.parentElement) folderBtn.parentElement.style.position = 'relative';
+      folderBtn.oncontextmenu = function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (folderPanel.style.display === 'none') {
+          if (!_kbFoldersLoaded) _loadKbFolders();
+          folderPanel.style.display = 'block';
+        } else {
+          folderPanel.style.display = 'none';
+        }
+      };
+      // 左键点击也支持打开/关闭（避免用户不知道要右键）
+      folderBtn.onclick = function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (folderPanel.style.display === 'none') {
+          if (!_kbFoldersLoaded) _loadKbFolders();
+          folderPanel.style.display = 'block';
+        } else {
+          folderPanel.style.display = 'none';
+        }
+      };
+      // 点击外部关闭面板
+      document.addEventListener('click', function(e) {
+        if (folderPanel.style.display !== 'none' && !folderPanel.contains(e.target) && e.target !== folderBtn) {
+          folderPanel.style.display = 'none';
+        }
+      });
+      document.addEventListener('contextmenu', function(e) {
+        if (folderPanel.style.display !== 'none' && !folderPanel.contains(e.target) && e.target !== folderBtn) {
+          folderPanel.style.display = 'none';
+        }
+      });
+    }
     // 初始化状态显示
     updateStatusDisplay();
     sessionPicker.onchange = onSessionChange;
@@ -1012,7 +1057,7 @@
     toggle.style.cssText =
       'color:var(--hdc-fg-dim);cursor:pointer;padding:6px 0;user-select:none;' +
       'font-family:var(--hdc-mono)';
-    toggle.textContent = '\u25BC \u601d\u8003\u8fc7\u7a0b';
+    toggle.textContent = '\u25B6 \u601d\u8003\u8fc7\u7a0b';
     toggle.onclick = function() {
       var body = reasoningEl.querySelector('.hdc-reasoning');
       var open = body.classList.toggle('open');
@@ -1020,7 +1065,7 @@
     };
 
     var body = document.createElement('div');
-    body.className = 'hdc-reasoning open';
+    body.className = 'hdc-reasoning';
     body.style.cssText =
       'color:var(--hdc-fg-dim);background:var(--hdc-muted);border-left:3px solid var(--hdc-border);' +
       'padding:8px 12px;border-radius:0 6px 6px 0;white-space:pre-wrap;word-break:break-word;' +
@@ -1087,11 +1132,14 @@
           } else {
             console.log('[Overlay] window.autoActivateObsVault not available');
           }
+          // WS 已就绪、vault 已激活，加载已排除的文件夹（重启后保持排除状态）
+          _loadExcludedFoldersFromConfig();
         });
       } else {
         console.log('[Overlay] loadAppConfig not available, calling autoActivateObsVault directly');
         if (typeof initStockOnConnect === 'function') initStockOnConnect();
         if (typeof window.autoActivateObsVault === 'function') window.autoActivateObsVault();
+        _loadExcludedFoldersFromConfig();
       }
     };
 
@@ -1183,7 +1231,7 @@
               var body = reasoningEl.querySelector('.hdc-reasoning');
               if (body) body.textContent = reasoningText;
               var toggle = reasoningEl.querySelector('div');
-              if (toggle) { body.classList.add('open'); toggle.textContent = '\u25BC \u601d\u8003\u8fc7\u7a0b'; }
+              if (toggle) { toggle.textContent = '\u25B6 \u601d\u8003\u8fc7\u7a0b'; }
             }
             break;
 
@@ -2042,6 +2090,159 @@
     return messages;
   }
 
+  // 更新文件夹选择按钮的标签
+  function _updateKbFolderButtonLabel() {
+    var btn = document.getElementById('hdc-kb-folder-btn');
+    if (!btn) return;
+    if (_kbExcludedFolders.length === 0) {
+      btn.textContent = '\ud83d\udcc2 \u5168\u90e8';  // 📂 全部
+    } else {
+      btn.textContent = '\ud83d\udcc2 \u6392\u9664' + _kbExcludedFolders.length + '\u4e2a';  // 📂 排除N个
+    }
+  }
+
+  // 从配置文件加载已排除的文件夹（重启后保持排除状态）
+  function _loadExcludedFoldersFromConfig() {
+    rpcCall('obsidian.get_excluded_folders', {}, function(r) {
+      if (r && !r.error && r.excluded_folders) {
+        _kbExcludedFolders = (r.excluded_folders || []).slice();
+        _updateKbFolderButtonLabel();
+        // 若面板已展开，重新渲染以反映已保存的勾选状态
+        var panel = document.getElementById('hdc-kb-folder-panel');
+        if (panel && panel.style.display === 'block') {
+          _kbFoldersLoaded = false;
+          _loadKbFolders();
+        }
+      }
+    });
+  }
+
+  // 保存已排除的文件夹到配置文件
+  function _saveExcludedFoldersToConfig() {
+    rpcCall('obsidian.set_excluded_folders', { excluded_folders: _kbExcludedFolders }, function(r) {
+      if (r && r.error) {
+        console.log('[AutoKB] 保存排除文件夹失败', r.error.message || r.error);
+      }
+    });
+  }
+
+  // 计算文件夹相对 vault 的路径（用于过滤匹配）
+  function _kbRelPath(fullPath, vaultPath) {
+    var vp = (vaultPath || '').replace(/\\/g, '/').replace(/\/+$/, '');
+    var fp = (fullPath || '').replace(/\\/g, '/').replace(/\/+$/, '');
+    if (vp && fp.toLowerCase().indexOf(vp.toLowerCase()) === 0) {
+      return fp.substring(vp.length).replace(/^\/+/, '');
+    }
+    return fp;
+  }
+
+  // 收集面板内所有勾选的文件夹（每次勾选变化时重新扫描整个树）
+  function _collectKbFolderFilter() {
+    _kbExcludedFolders = [];
+    var all = document.querySelectorAll('#hdc-kb-folder-panel input[data-kb-folder]');
+    for (var n = 0; n < all.length; n++) {
+      if (all[n].checked) _kbExcludedFolders.push(all[n].getAttribute('data-kb-folder'));
+    }
+    _updateKbFolderButtonLabel();
+    _saveExcludedFoldersToConfig();
+  }
+
+  // 递归渲染某层文件夹的子目录（懒加载，隐藏 . 开头）
+  function _renderFolderChildren(container, folderFullPath, depth, vaultPath) {
+    var pad = depth * 12 + 8;
+    container.innerHTML = '<div style="padding:2px ' + pad + 'px;color:var(--hdc-fg-dim);font-size:11px">\u52a0\u8f7d\u4e2d...</div>';  // 加载中...
+    rpcCall('obsidian.list_files', { path: folderFullPath }, function(r) {
+      if (r.error || !r.items) {
+        container.innerHTML = '<div style="padding:2px ' + pad + 'px;color:#e88;font-size:11px">\u52a0\u8f7d\u5931\u8d25</div>';  // 加载失败
+        return;
+      }
+      var dirs = [];
+      for (var i = 0; i < r.items.length; i++) {
+        var e = r.items[i];
+        // 隐藏 . 开头的文件和文件夹
+        if (e.is_dir && e.name && !e.name.startsWith('.')) dirs.push(e);
+      }
+      if (dirs.length === 0) {
+        container.innerHTML = '';
+        return;
+      }
+      var html = '';
+      for (var j = 0; j < dirs.length; j++) {
+        var d = dirs[j];
+        var rel = _kbRelPath(d.path, vaultPath);
+        var checked = _kbExcludedFolders.indexOf(rel) >= 0 ? ' checked' : '';
+        html += '<div style="display:flex;align-items:center;gap:4px;padding:2px ' + pad + 'px">' +
+          '<span data-kb-expand data-kb-fullpath="' + hdcEscape(d.path) + '" style="cursor:pointer;color:var(--hdc-fg-dim);width:12px;flex-shrink:0;user-select:none">\u25b8</span>' +  // ▸
+          '<input type="checkbox" data-kb-folder="' + hdcEscape(rel) + '"' + checked + ' style="margin:0;cursor:pointer;flex-shrink:0">' +
+          '<span style="font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + hdcEscape(d.name) + '</span>' +
+          '</div>';
+        html += '<div data-kb-children style="display:none"></div>';
+      }
+      container.innerHTML = html;
+      // 绑定展开/折叠
+      var expands = container.querySelectorAll('[data-kb-expand]');
+      for (var k = 0; k < expands.length; k++) {
+        (function(arrow) {
+          arrow.onclick = function(ev) {
+            ev.stopPropagation();
+            var fullpath = arrow.getAttribute('data-kb-fullpath');
+            var childContainer = arrow.parentElement.nextElementSibling;
+            if (!childContainer) return;
+            if (arrow.textContent === '\u25b8') {  // ▸ 展开
+              arrow.textContent = '\u25be';  // ▾
+              childContainer.style.display = 'block';
+              if (!childContainer.getAttribute('data-loaded')) {
+                _renderFolderChildren(childContainer, fullpath, depth + 1, vaultPath);
+                childContainer.setAttribute('data-loaded', '1');
+              }
+            } else {  // ▾ 折叠
+              arrow.textContent = '\u25b8';
+              childContainer.style.display = 'none';
+            }
+          };
+        })(expands[k]);
+      }
+      // 绑定复选框
+      var checks = container.querySelectorAll('input[data-kb-folder]');
+      for (var m = 0; m < checks.length; m++) {
+        checks[m].onchange = _collectKbFolderFilter;
+      }
+    });
+  }
+
+  // 加载文件夹选择树（支持展开子目录、勾选任意层级）
+  function _loadKbFolders() {
+    var vaultPath = getObsidianVaultPath();
+    var panel = document.getElementById('hdc-kb-folder-panel');
+    if (!panel) return;
+    if (!vaultPath) {
+      _kbFoldersLoaded = true;
+      panel.innerHTML = '<div style="color:var(--hdc-fg-dim);font-size:11px;padding:4px">vault \u672a\u8bbe\u7f6e</div>';
+      return;
+    }
+    _kbFoldersLoaded = true;
+    var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding:0 2px">' +
+      '<span style="color:var(--hdc-fg-dim);font-size:10px">\u9009\u6587\u4ef6\u5939\u6392\u9664\u6587\u4ef6</span>' +  // 选文件夹排除文件
+      '<a data-kb-clear href="#" style="color:var(--hdc-accent);font-size:10px;text-decoration:underline">\u6e05\u9664</a>' +  // 清除
+      '</div>';
+    html += '<div id="hdc-kb-folder-root"></div>';
+    panel.innerHTML = html;
+    var clearLink = panel.querySelector('[data-kb-clear]');
+    if (clearLink) {
+      clearLink.onclick = function(ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        _kbExcludedFolders = [];
+        var all = panel.querySelectorAll('input[data-kb-folder]');
+        for (var i = 0; i < all.length; i++) all[i].checked = false;
+        _updateKbFolderButtonLabel();
+        _saveExcludedFoldersToConfig();
+      };
+    }
+    var root = panel.querySelector('#hdc-kb-folder-root');
+    _renderFolderChildren(root, vaultPath, 0, vaultPath);
+  }
+
   // 语义搜索：使用上下文感知向量搜索（多消息 embedding 加权融合）
   function searchSemantic(filePaths, originalQuery, onDone) {
     console.log('[AutoKB] Semantic: 开始上下文感知语义搜索...');
@@ -2055,8 +2256,8 @@
       return;
     }
     
-    // 收集最近20条用户消息作为上下文
-    var recentMessages = _getRecentUserMessages(20);
+    // 收集最近2条用户消息 + 当前消息 = 共3条
+    var recentMessages = _getRecentUserMessages(2);
     // 构建搜索消息列表：[历史消息..., 当前消息]
     // 当前消息放最后（权重最高）
     var contextMessages = [];
@@ -2068,30 +2269,22 @@
     }
     contextMessages.push(originalQuery);  // 当前消息放最后
     
-    console.log('[AutoKB] Semantic: 上下文消息数:', contextMessages.length, '(含当前消息，最多20条)');
+    console.log('[AutoKB] Semantic: 上下文消息数:', contextMessages.length, '(含当前消息，共3条)');
     
-    // 计算权重：当前消息最高，历史消息按距离递减
-    // 权重设计：当前0.35，然后0.2, 0.15, 0.1, 0.08, 0.05, 0.04, 0.03... 递减
+    // 权重：当前消息0.6，历史消息按距离递减
     var weights = [];
     var n = contextMessages.length;
     for (var i = 0; i < n; i++) {
-      var distFromEnd = n - 1 - i;  // 距离末尾的距离
+      var distFromEnd = n - 1 - i;
       var w;
       if (distFromEnd === 0) {
-        w = 0.35;  // 当前消息
+        w = 0.60;  // 当前消息
       } else if (distFromEnd === 1) {
-        w = 0.20;  // 前一条
+        w = 0.25;  // 上一条
       } else if (distFromEnd === 2) {
-        w = 0.15;  // 前两条
-      } else if (distFromEnd === 3) {
-        w = 0.10;  // 前三条
-      } else if (distFromEnd === 4) {
-        w = 0.08;  // 前四条
-      } else if (distFromEnd === 5) {
-        w = 0.05;  // 前五条
+        w = 0.15;  // 上两条
       } else {
-        // 更早的消息权重快速衰减
-        w = Math.max(0.01, 0.05 - (distFromEnd - 5) * 0.005);
+        w = 0.10;
       }
       weights.push(w);
     }
@@ -2102,7 +2295,7 @@
       processedMessages.push(preprocessQuery(contextMessages[i]));
     }
     
-    rpcCall('embedding.query_index_with_context', { messages: processedMessages, weights: weights, top_k: _autoKbMaxFiles }, function(r) {
+    rpcCall('embedding.query_index_with_context', { messages: processedMessages, weights: weights, top_k: _autoKbMaxFiles, exclude_folders: _kbExcludedFolders }, function(r) {
       if (r.error) {
         console.log('[AutoKB] Semantic: 上下文搜索失败', r.error.message || r.error);
         onDone([]);
@@ -2115,30 +2308,18 @@
         return;
       }
       console.log('[AutoKB] Semantic: 上下文搜索结果', results.length, '个');
-      
-      // 过滤低相似度结果（使用相对阈值）
-      var MIN_SIMILARITY = 0.55;  // 最低绝对相似度阈值（提高，避免短查询误触发）
-      var RELATIVE_THRESHOLD = 0.10;  // 与最高分的最小差距（相对阈值）
-      
-      // 找出最高相似度
-      var maxSimilarity = 0;
-      for (var i = 0; i < results.length; i++) {
-        if (results[i].similarity > maxSimilarity) {
-          maxSimilarity = results[i].similarity;
-        }
+      if (results.length > 0) {
+        console.log('[AutoKB] Semantic: 最高相似度:', results[0].similarity.toFixed(4), '最低:', results[results.length-1].similarity.toFixed(4));
       }
       
-      // 返回匹配的 chunk 片段（包含内容，不再需要读取整个文件）
+      // 过滤低相似度结果（后端已做 0.45 阈值过滤，前端不再重复过滤）
       var matchedChunks = [];
       for (var i = 0; i < results.length && i < _autoKbMaxFiles; i++) {
         var sim = results[i].similarity;
-        var diff = maxSimilarity - sim;
-        
-        // 必须同时满足：绝对阈值 + 与最高分差距不超过阈值
-        if (sim >= MIN_SIMILARITY && diff <= RELATIVE_THRESHOLD) {
-          var chunkInfo = results[i].chunkTotal > 1 ? 
+        {
+          var chunkInfo = results[i].chunkTotal > 1 ?
             ' [片段 ' + (results[i].chunkIdx + 1) + '/' + results[i].chunkTotal + ']' : '';
-          console.log('[AutoKB] Semantic: ', results[i].fileName, chunkInfo, '相似度:', sim.toFixed(3), '差距:', diff.toFixed(3));
+          console.log('[AutoKB] Semantic: ', results[i].fileName, chunkInfo, '相似度:', sim.toFixed(3));
           matchedChunks.push({
             path: results[i].path,
             fileName: results[i].fileName,
@@ -2149,12 +2330,10 @@
             charEnd: results[i].charEnd || 0,
             similarity: sim
           });
-        } else {
-          console.log('[AutoKB] Semantic: 跳过', results[i].fileName, '相似度:', sim.toFixed(3), '差距:', diff.toFixed(3));
         }
       }
       
-      console.log('[AutoKB] Semantic: 最终匹配', matchedChunks.length, '个片段（最高分:', maxSimilarity.toFixed(3), '，相对阈值:', RELATIVE_THRESHOLD, '）');
+      console.log('[AutoKB] Semantic: 最终匹配', matchedChunks.length, '个片段');
       onDone(matchedChunks);
     });
   }

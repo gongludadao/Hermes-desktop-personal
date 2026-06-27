@@ -9,9 +9,11 @@ Embedding RPC 模块 - 提供向量搜索功能
 """
 import os
 import json
+import math
 import threading
 import time
 from pathlib import Path
+from collections import Counter
 
 # 后台构建状态
 _index_build_status = {
@@ -44,12 +46,21 @@ except ImportError:
     _numpy_available = False
     np = None
 
+# 尝试导入 jieba（可选）
+try:
+    import jieba
+    import logging
+    jieba.setLogLevel(logging.WARNING)  # 静默 jieba 的加载日志
+    _jieba_available = True
+except ImportError:
+    _jieba_available = False
+
 # Local Embedding Config
 _embedding_model_name = "Qwen/Qwen3-Embedding-0.6B"
 _embedding_cache_dir = Path(__file__).parent.resolve() / "cache" / "embeddings"
 _index_file = _embedding_cache_dir / "vault_index.json"
 _embedding_available = False
-_INDEX_VERSION = 2  # 索引格式版本（v2=分块索引），不匹配时强制重建
+_INDEX_VERSION = 4  # 索引格式版本（v4=更大chunk+更多段落合并），不匹配时强制重建
 
 # Local model (lazy load)
 _embedding_model = None
@@ -79,11 +90,12 @@ def _load_model():
         
         import torch
         import os
-        
-        # 设置离线模式，避免连接 HuggingFace 超时
-        os.environ["HF_HUB_OFFLINE"] = "1"
-        os.environ["TRANSFORMERS_OFFLINE"] = "1"
-        
+
+        # 在 import transformers 之前设置镜像端点（huggingface_hub 在导入时缓存端点）
+        # 国内环境 huggingface.co 被墙，默认走 hf-mirror.com
+        if "HF_ENDPOINT" not in os.environ:
+            os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
         # 尝试使用 DirectML (支持所有 Windows GPU，包括 RTX 5060)
         _device = "cpu"
         _dml_device = None
@@ -102,22 +114,21 @@ def _load_model():
         # 用 transformers 加载（手动控制推理，绕过 DirectML 不兼容操作）
         from transformers import AutoModel, AutoTokenizer
         
-        _tokenizer = AutoTokenizer.from_pretrained(_embedding_model_name, trust_remote_code=True, padding_side="left")
+        # 加载策略：先本地缓存，再在线下载（走 hf-mirror.com）
+        try:
+            _tokenizer = AutoTokenizer.from_pretrained(_embedding_model_name, trust_remote_code=True, padding_side="left", local_files_only=True)
+            _embedding_model = AutoModel.from_pretrained(_embedding_model_name, trust_remote_code=True, dtype=torch.float32, local_files_only=True)
+            print("[Embedding] 模型加载成功（本地缓存）")
+        except (OSError, EnvironmentError):
+            print("[Embedding] 本地缓存未找到，从 hf-mirror.com 下载...")
+            _tokenizer = AutoTokenizer.from_pretrained(_embedding_model_name, trust_remote_code=True, padding_side="left")
+            _embedding_model = AutoModel.from_pretrained(_embedding_model_name, trust_remote_code=True, dtype=torch.float32)
+            print("[Embedding] 模型加载成功（hf-mirror.com 下载）")
         
         if _dml_device is not None:
-            # DirectML: 用 float32 加载
-            _embedding_model = AutoModel.from_pretrained(
-                _embedding_model_name,
-                trust_remote_code=True,
-                dtype=torch.float32
-            )
             _embedding_model = _embedding_model.to(_dml_device)
             print("[Embedding] Model 加载完成！(DirectML GPU 模式)")
         else:
-            _embedding_model = AutoModel.from_pretrained(
-                _embedding_model_name,
-                trust_remote_code=True
-            )
             print("[Embedding] Model 加载完成！(CPU 模式)")
         
         _embedding_model.eval()
@@ -310,9 +321,389 @@ def _cosine_similarity(vec1, vec2):
     return dot_product / (norm1 * norm2)
 
 
+# ── BM25 关键词评分（混合搜索用） ─────────────────────────────────────────
+
+# 意图关键词映射（本地 jieba 判断，无需 LLM）
+_INTENT_KEYWORDS = {
+    "健康": ["健康", "锻炼", "运动", "健身", "身体", "医疗", "吃药", "医院",
+             "跑步", "训练", "哑铃", "卧推", "推胸", "练胸", "杠铃", "胸部",
+             "肌肉", "力量", "重量", "减肥", "瘦", "胖", "营养", "饮食", "体重"],
+    "小说": ["小说", "剧情", "角色", "故事", "章节", "主角", "配角", "情节",
+             "大纲", "设定", "世界观", "穿越", "修仙", "玄幻", "科幻"],
+    "财务": ["信用", "账单", "消费", "财务", "银行", "信用卡", "收入", "支出",
+             "存款", "成本", "价格", "贵", "便宜", "省钱", "赚钱", "花钱",
+             "贷款", "利息", "预算", "报销", "发票"],
+}
+
+
+def _determine_intent(query_text):
+    """根据查询文本判断意图（本地 jieba 分词匹配）
+
+    Args:
+        query_text: 用户查询文本
+
+    Returns:
+        str: 意图名称（健康/小说/财务/通用）
+    """
+    if not query_text or len(query_text.strip()) < 2:
+        return "通用"
+    tokens = _tokenize_bm25(query_text)
+    if not tokens:
+        return "通用"
+    # 每个意图：计算匹配到的 token 数
+    scores = {}
+    for intent, words in _INTENT_KEYWORDS.items():
+        score = 0
+        for tok in tokens:
+            for w in words:
+                if w in tok or tok in w:
+                    score += 1
+                    break
+        if score > 0:
+            scores[intent] = score
+    if not scores:
+        return "通用"
+    return max(scores, key=scores.get)
+
+
+def _intent_content_filter(results, intent):
+    """根据意图过滤结果：只保留 chunk 内容匹配意图关键词的文件
+
+    不依赖文件路径/名称，文件移到哪都能过滤。
+    Args:
+        results: [{path, fileName, chunkText, ...}] 搜索结果列表
+        intent: 意图名称
+
+    Returns:
+        [{path, fileName, ...}] 过滤后的结果列表
+    """
+    if intent == "通用" or not results:
+        return results
+    keywords = _INTENT_KEYWORDS.get(intent, [])
+    if not keywords:
+        return results
+    filtered = []
+    for r in results:
+        txt = (r.get("chunkText", "") or "").lower()
+        match_count = sum(1 for kw in keywords if kw in txt)
+        sim = r.get("similarity", 0)
+        # 自适应阈值：2+词直接通过；1词需高分背书；0词丢弃
+        if match_count >= 2:
+            filtered.append(r)
+        elif match_count == 1 and sim >= 0.55:
+            filtered.append(r)
+    print(f"[Intent] 意图={intent}, 关键词={keywords[:5]}..., "
+          f"过滤前={len(results)}, 过滤后={len(filtered)} (自适应: 2+词或1词+高分)")
+    if len(results) - len(filtered) > 0:
+        dropped = [r.get("fileName", "?") for r in results if r not in filtered]
+        print(f"[Intent] 丢弃: {dropped}")
+    return filtered
+
+# 中文停用词（BM25 过滤用，避免 '的'、'我'、'了' 等无意义词驱动评分）
+_STOP_WORDS = frozenset({
+    '的', '了', '我', '你', '他', '她', '它', '们', '这', '那', '哪',
+    '是', '在', '有', '不', '也', '就', '都', '而', '及', '与', '着',
+    '或', '一个', '没有', '我们', '你们', '他们', '她们', '它们',
+    '什么', '怎么', '怎么样', '怎样', '这样', '那样', '这个', '那个',
+    '这些', '那些', '这里', '那里', '和', '跟', '对', '到', '去',
+    '能', '会', '要', '可以', '还', '很', '太', '更', '最', '比较',
+    '已经', '正在', '通过', '因为', '所以', '但是', '然而', '如果',
+    '虽然', '而且', '之后', '之前', '然后', '吗', '呢', '吧', '啊',
+    '哦', '嗯', '呀', '嘛', '哈', '哇', '哟', '呵', '嘿', '喂',
+    '的', '地', '得', '着', '过', '把', '被', '让', '给', '向',
+    '从', '在', '于', '自', '往', '朝', '到', '由', '以', '用',
+    '为', '为了', '因为', '除了', '对于', '关于', '按照', '依照',
+    '凭', '靠', '根据', '据', '按', '照', '从', '自从', '当',
+    '好', '是', '做', '为', '的', '了', '过', '吧', '啊', '呢',
+    '呀', '吗', '哈', '哦', '嗯', '哇', '呵', '哟', '喂', '嘿',
+    '嘛', '哈', '哇', '哟', '呵', '喂', '呀', '哦', '嗯',
+})
+
+
+def _tokenize_bm25(text):
+    """分词并过滤停用词，用于 BM25 关键词匹配"""
+    if not text:
+        return []
+    if _jieba_available:
+        tokens = list(jieba.cut(text.strip()))
+    else:
+        tokens = [c for c in text.strip() if c.strip()]
+    return [t for t in tokens if t.strip() and t not in _STOP_WORDS and not all(c in '，。？！、；：""''（）【】《》—…·～．' for c in t)]
+
+
+def _bm25_scores(query_tokens, doc_tokens_list, k1=1.5, b=0.75):
+    """计算 BM25 分数
+
+    Args:
+        query_tokens: 查询的分词结果 [str]
+        doc_tokens_list: 文档的分词结果列表 [[str], ...]
+        k1, b: BM25 参数
+
+    Returns:
+        scores: [float] 每个文档的 BM25 分数
+    """
+    if not query_tokens or not doc_tokens_list:
+        return [0.0] * len(doc_tokens_list) if doc_tokens_list else []
+
+    N = len(doc_tokens_list)
+    doc_lens = [len(d) for d in doc_tokens_list]
+    avgdl = sum(doc_lens) / N if N > 0 else 1.0
+
+    # 文档频率（DF）：包含该 term 的文档数
+    df = Counter()
+    for doc in doc_tokens_list:
+        seen = set(doc)
+        for t in seen:
+            df[t] += 1
+
+    scores = []
+    for doc_tokens in doc_tokens_list:
+        doc_len = len(doc_tokens)
+        counter = Counter(doc_tokens)
+        score = 0.0
+        for t in query_tokens:
+            if t not in df:
+                continue
+            tf = counter.get(t, 0)
+            if tf == 0:
+                continue
+            idf = math.log((N - df[t] + 0.5) / (df[t] + 0.5) + 1.0)
+            score += idf * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc_len / avgdl))
+        scores.append(score)
+    return scores
+
+
+def _hybrid_search(query_text, query_embedding, documents, matrix, alpha=0.65, top_k=10):
+    """混合搜索：向量余弦相似度 + BM25 关键词评分
+
+    Args:
+        query_text: 原始查询文本（用于 BM25）
+        query_embedding: 查询 embedding 向量（用于向量搜索）
+        documents: [{path, fileName, chunkText, embedding, ...}]
+        matrix: 预归一化的 embedding 矩阵 (N, D) 或 None
+        alpha: 向量分数权重，BM25 权重 = 1-alpha
+        top_k: 返回结果数
+
+    Returns:
+        [{path, fileName, similarity, chunkText, ...}] 按混合分数降序
+    """
+    if not query_text or not documents:
+        return []
+
+    # 1. 向量相似度
+    if matrix is not None and _numpy_available and np is not None:
+        q = np.array(query_embedding, dtype=np.float32)
+        q_norm = np.linalg.norm(q)
+        if q_norm > 0:
+            q = q / q_norm
+        vec_sims = (matrix @ q).tolist()  # (N,) → [float]
+    else:
+        vec_sims = [_cosine_similarity(query_embedding, doc.get("embedding", [])) for doc in documents]
+
+    # 2. BM25 关键词评分（原始值，不归一化）
+    query_tokens = _tokenize_bm25(query_text)
+    doc_texts = [(doc.get("chunkText", "") or doc.get("fileName", "")) for doc in documents]
+    doc_tokens_list = [_tokenize_bm25(t) for t in doc_texts]
+    bm25_raw = _bm25_scores(query_tokens, doc_tokens_list)
+
+    # 3. 双层门控混合策略：
+    #    - BM25 > 0 + vec >= 0.45（语义相关 + 关键词匹配）→ 正常混合
+    #    - BM25 > 0 + vec < 0.45（语义不相关，仅关键词匹配）→ 打残，BM25 不能救人
+    #    - BM25 == 0（零关键词匹配）→ 打残
+    BM25_PENALTY = 0.15  # 零关键词/低语义匹配时的向量分折扣
+    VEC_GATE = 0.45      # 语义门控阈值：vec 低于此值时 BM25 无法加分
+
+    # 对 BM25 > 0 的做 min-max 归一化
+    bm25_positive = [s for s in bm25_raw if s > 0]
+    if bm25_positive:
+        b_min, b_max = min(bm25_positive), max(bm25_positive)
+        bm25_norm = []
+        for s in bm25_raw:
+            if s > 0:
+                if b_max > b_min:
+                    bm25_norm.append((s - b_min) / (b_max - b_min))
+                else:
+                    bm25_norm.append(1.0)
+            else:
+                bm25_norm.append(0.0)
+    else:
+        bm25_norm = [0.0] * len(bm25_raw)
+
+    # 4. 加权融合（双层门控）
+    all_results = []
+    keyword_matched = 0
+    keyword_missed = 0
+    vec_gated = 0
+    for i, doc in enumerate(documents):
+        if bm25_raw[i] > 0 and vec_sims[i] >= VEC_GATE:
+            # 语义相关 + 关键词命中 → 正常混合
+            hybrid = alpha * vec_sims[i] + (1 - alpha) * bm25_norm[i]
+            keyword_matched += 1
+        elif bm25_raw[i] > 0 and vec_sims[i] < VEC_GATE:
+            # 语义不相关（vec 低），BM25 不能救人 → 打残
+            hybrid = vec_sims[i] * BM25_PENALTY
+            vec_gated += 1
+        else:
+            # 零关键词匹配 → 打残
+            hybrid = vec_sims[i] * BM25_PENALTY
+            keyword_missed += 1
+        all_results.append({
+            "path": doc.get("path", ""),
+            "fileName": doc.get("fileName", ""),
+            "similarity": hybrid,
+            "vectorScore": vec_sims[i],
+            "bm25Score": bm25_norm[i],
+            "keywordMatch": bm25_raw[i] > 0,
+            "chunkIdx": doc.get("chunkIdx", 0),
+            "chunkTotal": doc.get("chunkTotal", 1),
+            "chunkText": doc.get("chunkText", ""),
+            "charStart": doc.get("charStart", 0),
+            "charEnd": doc.get("charEnd", 0),
+        })
+
+    all_results.sort(key=lambda x: x["similarity"], reverse=True)
+
+    # 输出调试信息
+    if all_results:
+        print(f"[Hybrid] alpha={alpha}, BM25门控={BM25_PENALTY}, vec门控={VEC_GATE}: "
+              f"关键词匹配={keyword_matched}, vec拦截={vec_gated}, 零匹配打残={keyword_missed}")
+        for r in all_results[:5]:
+            print(f"  top: {r['fileName']} hybrid={r['similarity']:.4f} "
+                  f"(vec={r['vectorScore']:.4f}, bm25={r['bm25Score']:.4f}, "
+                  f"kw={'✓' if r['keywordMatch'] else '✗'})")
+
+    return all_results[:top_k]
+
+
+# ── 滑动窗口上下文扩展 ────────────────────────────────────────────────────
+
+def _expand_chunks_with_neighbors(chunks, all_documents, window=1):
+    """将搜索结果中的每个 chunk 扩展为包含相邻 chunk 的滑动窗口
+
+    比如 window=1: chunk[i] 的文本 = chunk[i-1] + chunk[i] + chunk[i+1]
+
+    Args:
+        chunks: 搜索返回的 [{path, chunkIdx, ...}]
+        all_documents: 索引中全部文档 [{path, chunkIdx, chunkText, ...}]
+        window: 前后各取多少个 chunk
+
+    Returns:
+        同 chunks 结构，但 chunkText 已扩展
+    """
+    if not chunks or window <= 0:
+        return chunks
+
+    # 构建 (path, chunkIdx) → doc 的快速查找表
+    doc_map = {}
+    for d in all_documents:
+        key = (d.get("path", ""), d.get("chunkIdx", 0))
+        doc_map[key] = d
+
+    expanded = []
+    for c in chunks:
+        path = c["path"]
+        idx = c["chunkIdx"]
+
+        texts = []
+        for offset in range(-window, window + 1):
+            neighbor_key = (path, idx + offset)
+            neighbor = doc_map.get(neighbor_key)
+            if neighbor and neighbor.get("chunkText"):
+                texts.append(neighbor["chunkText"])
+
+        merged = "\n".join(texts) if texts else c.get("chunkText", "")
+        c["chunkText"] = merged
+        c["_window"] = len(texts)  # 调试标记
+        expanded.append(c)
+
+    if expanded:
+        print(f"[Window] 扩展 {len(expanded)} 个 chunk（窗口={window}）")
+
+    return expanded
+
+
 def _ensure_cache_dir():
     """确保缓存目录存在"""
     _embedding_cache_dir.mkdir(parents=True, exist_ok=True)
+
+
+# ── Metadata-Enriched Chunking ────────────────────────────────────
+# 给每个 chunk 的嵌入文本加上结构化元数据前缀，让 embedding 携带文档上下文
+# 前缀格式：[目录: xxx] [标签: xxx] [标题: xxx] → 原文内容
+# 完全本地化，不需要 LLM
+
+def _extract_frontmatter_tags(content):
+    """从 Obsidian markdown 的 frontmatter 中提取 tags
+
+    Args:
+        content: 文件原始内容
+
+    Returns:
+        str: 逗号分隔的标签字符串，无标签返回空字符串
+    """
+    if not content or not content.startswith("---"):
+        return ""
+    end_idx = content.find("---", 3)
+    if end_idx == -1:
+        return ""
+    fm = content[3:end_idx]
+    # 匹配 tags: [tag1, tag2] 或 tags: tag1, tag2 或 tags: tag1\n
+    import re as _re
+    tags_match = _re.search(r'tags\s*:\s*\[([^\]]*)\]', fm)
+    if tags_match:
+        return ",".join(t.strip() for t in tags_match.group(1).split(",") if t.strip())
+    tags_match = _re.search(r'tags\s*:\s*(.+)', fm)
+    if tags_match:
+        raw = tags_match.group(1).strip()
+        if raw and not raw.startswith("---"):
+            return ",".join(t.strip() for t in raw.replace("[", "").replace("]", "").split(",") if t.strip())
+    return ""
+
+
+def _extract_first_heading(content):
+    """提取文档第一个 # 标题"""
+    if not content:
+        return ""
+    import re as _re
+    m = _re.search(r'^#\s+(.+)$', content, _re.MULTILINE)
+    return m.group(1).strip() if m else ""
+
+
+def _build_metadata_prefix(fp, fileName, content):
+    """构建 chunk 嵌入用的元数据前缀
+
+    格式：[目录: parent/parent] [标签: a,b] [标题: xxx]
+    不依赖文件路径的持久性——标签和标题来自内容本身
+
+    Args:
+        fp: 文件绝对路径
+        fileName: 文件名
+        content: 文件原始内容
+
+    Returns:
+        str: 元数据前缀（后面拼 chunk 文本）
+    """
+    # 目录（最后两级）
+    parts = fp.replace("\\", "/").strip("/").split("/")
+    dir_str = "/".join(parts[-3:-1]) if len(parts) >= 3 else parts[-2] if len(parts) >= 2 else ""
+
+    # 标签（从 frontmatter）
+    tags = _extract_frontmatter_tags(content)
+
+    # 标题（第一个 H1）
+    heading = _extract_first_heading(content)
+
+    # 组装前缀
+    prefix_parts = []
+    if dir_str:
+        prefix_parts.append(f"[目录: {dir_str}]")
+    if tags:
+        prefix_parts.append(f"[标签: {tags}]")
+    if heading:
+        prefix_parts.append(f"[标题: {heading}]")
+    prefix_parts.append(f"[文件: {fileName}]")
+
+    return " ".join(prefix_parts) + " "
 
 
 # ── 文本分块（chunk）─────────────────────────────────────────────
@@ -320,8 +711,8 @@ def _ensure_cache_dir():
 # 搜索时返回匹配的 chunk 内容，而不是整个文件
 _CHUNK_MAX_CHARS = 1200   # 单个 chunk 最大字符数
 _CHUNK_OVERLAP = 100      # chunk 之间的重叠字符数（避免切断语义）
-_CHUNK_MIN_CHARS = 50     # 小于此长度的段落合并到前一段
-_MAX_CHUNKS_PER_FILE = 15 # 单个文件最多 chunk 数（避免超大文件爆炸）
+_CHUNK_MIN_CHARS = 200    # 小于此长度的段落合并到前一段（对话密集型文件需要更大值）
+_MAX_CHUNKS_PER_FILE = 30 # 单个文件最多 chunk 数（避免超大文件爆炸）
 
 
 def _chunk_text(content):
@@ -557,7 +948,9 @@ def _start_background_update_local(vault_path, cached_index, new_files, deleted_
                     index_data = [item for item in index_data if item.get("path") != fp]
 
                     for chunk_idx, chunk in enumerate(chunks):
-                        combined = fileName + " " + chunk["text"]
+                        # Metadata-Enriched Chunking：嵌入时前缀带上目录/标签/标题/文件名
+                        meta_prefix = _build_metadata_prefix(fp, fileName, content)
+                        combined = meta_prefix + chunk["text"]
                         texts_to_encode.append(combined)
                         chunk_metadata.append({
                             "path": fp,
@@ -840,8 +1233,9 @@ def register(gw):
                             chunks = [{"text": fileName, "charStart": 0, "charEnd": 0}]
                         
                         for chunk_idx, chunk in enumerate(chunks):
-                            # chunk 文本前缀加上文件名，提升文件名匹配权重
-                            combined = fileName + " " + chunk["text"]
+                            # Metadata-Enriched Chunking：嵌入时前缀带上目录/标签/标题/文件名
+                            meta_prefix = _build_metadata_prefix(fp, fileName, content)
+                            combined = meta_prefix + chunk["text"]
                             texts_to_encode.append(combined)
                             chunk_metadata.append({
                                 "path": fp,
@@ -1001,18 +1395,16 @@ def register(gw):
                                 "embedding": embeddings[i]
                             })
                 
-                # Save updated index
-                _ensure_cache_dir()
-                with open(_index_file, "w", encoding="utf-8") as f:
-                    json.dump({
-                        "vault_path": vault_path,
-                        "model": _embedding_model_name,
-                        "provider": "local",
-                        "version": _INDEX_VERSION,
-                        "count": len(index_data),
-                        "chunkCount": len(index_data),
-                        "index": index_data
-                    }, f, ensure_ascii=False)
+                # Save updated index（原子写入，防止并发/中断导致损坏）
+                _save_index_file({
+                    "vault_path": vault_path,
+                    "model": _embedding_model_name,
+                    "provider": "local",
+                    "version": _INDEX_VERSION,
+                    "count": len(index_data),
+                    "chunkCount": len(index_data),
+                    "index": index_data
+                })
                 
                 print(f"[Embedding] 后台更新完成，共 {len(index_data)} 个 chunk")
                 _index_build_status["building"] = False
@@ -1194,7 +1586,8 @@ def register(gw):
         try:
             index_data = _load_index_file()
             if index_data is None:
-                return gw._ok(rid, {"results": [], "total": 0})
+                _index_cache = None
+                return None
             documents = index_data.get("index", [])
             if not documents:
                 _index_cache = None
@@ -1317,6 +1710,7 @@ def register(gw):
         messages = params.get("messages", [])
         weights = params.get("weights", None)
         top_k = params.get("top_k", 5)
+        exclude_folders = params.get("exclude_folders", []) or []
 
         if not messages:
             return gw._err(rid, 4000, "messages required")
@@ -1379,37 +1773,69 @@ def register(gw):
 
             documents = cache["documents"]
             matrix = cache["matrix"]
+            vault_path = cache.get("vault_path", "")
 
-            # 用融合向量搜索
-            if matrix is not None and _numpy_available and np is not None:
-                q = np.array(fused, dtype=np.float32)
-                # fused 已经归一化，matrix 也已归一化，直接点积
-                similarities = matrix @ q
-            else:
-                similarities = [_cosine_similarity(fused, doc.get("embedding", [])) for doc in documents]
+            # ── 文件夹排除：跳过勾选文件夹内的文件（空=不排除，搜索全部，支持任意层级子目录）──
+            if exclude_folders:
+                vp_norm = (vault_path or "").replace("\\", "/").rstrip("/")
+                # 规范化要排除的文件夹为相对路径前缀（去掉首尾斜杠）
+                norm_folders = [
+                    f.replace("\\", "/").strip("/")
+                    for f in exclude_folders if f and f.strip("/")
+                ]
+                if norm_folders:
+                    keep_idx = []
+                    for i, doc in enumerate(documents):
+                        dp = (doc.get("path", "") or "").replace("\\", "/")
+                        if vp_norm and dp.startswith(vp_norm + "/"):
+                            rel = dp[len(vp_norm) + 1:].lstrip("/")
+                        else:
+                            rel = dp
+                        # 文件在排除文件夹下（含子目录）则跳过
+                        excluded = any(
+                            rel.startswith(f + "/") for f in norm_folders
+                        )
+                        if not excluded:
+                            keep_idx.append(i)
+                    total_before = len(documents)
+                    documents = [documents[i] for i in keep_idx]
+                    if matrix is not None:
+                        matrix = matrix[keep_idx] if keep_idx else matrix[0:0]
+                    print(f"[Folder] 排除文件夹: {norm_folders}, 过滤前={total_before}, 过滤后={len(documents)}")
+                    if not documents:
+                        return gw._ok(rid, {"results": [], "total": 0})
 
-            # 构建结果并排序
-            all_results = []
-            for i, doc in enumerate(documents):
-                sim = float(similarities[i]) if hasattr(similarities[i], '__float__') else float(similarities[i])
-                all_results.append({
-                    "path": doc.get("path", ""),
-                    "fileName": doc.get("fileName", ""),
-                    "similarity": sim,
-                    "chunkIdx": doc.get("chunkIdx", 0),
-                    "chunkTotal": doc.get("chunkTotal", 1),
-                    "chunkText": doc.get("chunkText", ""),
-                    "charStart": doc.get("charStart", 0),
-                    "charEnd": doc.get("charEnd", 0)
-                })
+            # 获取原始查询文本（最后一条消息）用于 BM25
+            query_text = messages[-1] if messages else ""
 
-            all_results.sort(key=lambda x: x["similarity"], reverse=True)
+            # ── 混合搜索：向量 + BM25 ──
+            hybrid_results = _hybrid_search(
+                query_text=query_text,
+                query_embedding=fused,
+                documents=documents,
+                matrix=matrix,
+                alpha=0.65,
+                top_k=top_k * 3,  # 多取一些，后面去重 + 窗口扩展
+            )
 
-            # 去重：同一文件最多 2 个 chunk
+            # ── 滑动窗口上下文扩展 ──
+            hybrid_results = _expand_chunks_with_neighbors(
+                hybrid_results, documents, window=1
+            )
+
+            # ── 意图后置过滤（基于 chunk 内容）──
+            intent = _determine_intent(query_text)
+            hybrid_results = _intent_content_filter(hybrid_results, intent)
+
+            # 去重：同一文件最多 2 个 chunk（保留最高分的）
+            # 后端阈值过滤：丢弃低分结果
+            MIN_HYBRID = 0.45
+            hybrid_results = [r for r in hybrid_results if r["similarity"] >= MIN_HYBRID]
+
             seen_files = {}
             top_results = []
             max_chunks_per_file = 2
-            for r in all_results:
+            for r in hybrid_results:
                 fp = r["path"]
                 cnt = seen_files.get(fp, 0)
                 if cnt >= max_chunks_per_file:
@@ -1419,8 +1845,14 @@ def register(gw):
                 if len(top_results) >= top_k:
                     break
 
-            return gw._ok(rid, {"results": top_results, "total": len(all_results)})
+            # 调试输出：最终返回给前端的 top 结果
+            print(f"[Final] 返回 top={len(top_results)} 个结果（阈值={MIN_HYBRID}, 窗口扩展+去重后）：")
+            for r in top_results:
+                print(f"  {r['fileName']} sim={r['similarity']:.4f}")
+
+            return gw._ok(rid, {"results": top_results, "total": len(hybrid_results)})
         except Exception as e:
+            print(f"[Hybrid] 搜索失败: {e}")
             return gw._err(rid, 5000, str(e))
 
     def _embedding_get_chunk_neighbors(rid, params):
